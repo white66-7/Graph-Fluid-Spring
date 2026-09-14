@@ -4,6 +4,10 @@
   <b>Dual-track momentum physics for Logseq Graph View.</b>
 </p>
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/5ca8a073-4cf5-4e67-98db-88b73960cb4e" alt="Graph Fluid Spring Demo" width="600" style="max-width: 100%; border-radius: 8px;" />
+</p>
+
 ---
 
 ## ✨ Features
