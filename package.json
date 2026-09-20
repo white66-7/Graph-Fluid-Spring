@@ -1,18 +1,27 @@
 {
-  "name": "logseq-plugin-graph-fluid-spring",
-  "version": "1.0.0",
-  "description": "True dual-track momentum spring for Logseq Graph: Hard-brake camera and fluid elastic nodes.",
+  "name": "logseq-graph-inertia",
+  "version": "2.0.0",
+  "description": "A living, force-simulated knowledge graph for Logseq — with momentum dragging, pop-out springs, radial shockwaves and time-travel growth. Replaces the built-in graph view.",
   "main": "index.html",
   "author": "white66-7",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/white66-7/Graph-Fluid-Spring"
+    "url": "https://github.com/white66-7/logseq-graph-inertia"
   },
   "logseq": {
-    "id": "logseq-graph-fluid-spring",
-    "title": "Graph Fluid Spring",
+    "id": "logseq-graph-inertia",
+    "title": "Graph Inertia",
     "icon": "icon.svg",
     "effect": true
-  }
+  },
+  "keywords": [
+    "logseq",
+    "logseq-plugin",
+    "graph",
+    "force-directed",
+    "knowledge-graph",
+    "visualization",
+    "time-travel"
+  ]
 }

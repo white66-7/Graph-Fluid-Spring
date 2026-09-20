@@ -1,379 +1,229 @@
-(() => {
+/*
+ * Graph Fluid Inertia — Logseq 生命周期胶水
+ * ===========================================================================
+ * 这个文件只做三件事：
+ *   1. 注册设置面板 + 同步设置
+ *   2. 监听 #global-graph 的【出现与消失】，挂载 / 拆卸渲染器
+ *   3. 把节点点击接到 Logseq 的页面跳转
+ *
+ * 真正的图谱渲染全在 src/ 下。
+ *
+ * ── v1 遗留说明 ──
+ * 旧的 WebGL uniformMatrix3fv 劫持、capture 阶段的 topWin 指针监听、
+ * 合成 PointerEvent 傀儡都已删除。原因见 README / 架构文档：
+ *   · Pixi v8 在 WebGL2 下走 UBO，uniformMatrix3fv 根本不会被调用；
+ *   · 即使调用了，改 projection matrix 也只是相机缩放（相似变换），
+ *     数学上无法表达"逐节点独立受力"；
+ *   · 合成 PointerEvent 只能驱动一个 drag session，无法注入外力。
+ */
+(function () {
   'use strict';
 
-  // 1. 默认物理配置 / Default Physics Configuration
-  const CONFIG = {
-    stiffness: 0.092,           // 刚度 / Spring tension
-    damping: 0.285,             // 阻尼 / Damping ratio
-    overshootMultiplier: 3.6,   // 冲量倍率 / Momentum multiplier
-    minTriggerSpeed: 1.0,       // 最低触发速度 / Min trigger speed
-    minDragDist: 7.0,           // 最小拖拽距离 / Min drag distance
-    maxSpeed: 32.0,             // 极速钳制 / Max speed clamp
-    sampleWindow: 75,           // 采样窗口 / Sampling window (ms)
-    stopSpeed: 0.12,            // 停机速度阈值 / Rest velocity threshold
-    stopDistance: 0.35,         // 停机位移阈值 / Rest distance threshold
+  const GFI = window.GFI;
+  if (!GFI) { console.error('[GFI] src/ 未加载，检查 index.html 的脚本顺序'); return; }
+
+  const SCAN_THROTTLE_MS = 120;
+
+  let graphApi = null;
+  let observer = null;
+  let scanTimer = null;
+  let booting = false;
+
+  // -------------------------------------------------------------------------
+  // 检测图谱视图
+  // -------------------------------------------------------------------------
+  function graphRootPresent() {
+    try {
+      return !!GFI.Overlay.findRoot();
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function mountGraph() {
+    if (graphApi || booting) return;
+    booting = true;
+    try {
+      const cfg = GFI.config;
+      // 先用空数据挂载 —— 立刻给出视觉反馈，数据到了再 setData
+      graphApi = GFI.Main.boot({
+        nodes: [],
+        links: [],
+        onNodeActivate: activateNode,
+      });
+      if (!graphApi) { booting = false; return; }
+
+      const t0 = performance.now();
+      const data = await GFI.DataSource.fetchData({
+        source: cfg.dataSource,
+        demoCount: cfg.demoCount,
+        includeParentLinks: false,
+      });
+      if (!graphApi) { booting = false; return; }   // 期间被拆掉了
+      console.log(`[GFI] 数据就绪 ${Math.round(performance.now() - t0)}ms`);
+      graphApi.setData(data.nodes, data.links);
+    } catch (e) {
+      console.error('[GFI] 挂载失败', e);
+    } finally {
+      booting = false;
+    }
+  }
+
+  // 重新拉一次数据并重建图谱。
+  // 改过滤规则后不用重载插件 —— 由 __GFI__.reload() 调用
+  GFI.reloadData = async function reloadData() {
+    if (!graphApi) return null;
+    const data = await GFI.DataSource.fetchData({
+      source: GFI.config.dataSource,
+      demoCount: GFI.config.demoCount,
+      includeParentLinks: false,
+    });
+    if (graphApi) graphApi.setData(data.nodes, data.links);
+    return data;
   };
 
-  // 2. 修复后的合规设置表单 (移除非法的 heading，使用标准的 4 种类型)
-  const settingsSchema = [
-    {
-      key: 'stiffness',
-      type: 'number',
-      title: '🌀 [Physics] Spring Stiffness / 弹簧刚度',
-      description: 'Determines return tension. Higher values snap back faster; lower values feel softer. (Recommended: 0.05 - 0.20)\n决定回弹拉力强度。数值越大回弹越迅猛，数值越小越松散绵柔。(推荐: 0.05 ~ 0.20)',
-      default: 0.092,
-    },
-    {
-      key: 'damping',
-      type: 'number',
-      title: '🌀 [Physics] Damping Ratio / 阻尼系数',
-      description: 'Controls friction and energy loss. Lower values oscillate longer; higher values feel more viscous. (Recommended: 0.15 - 0.45)\n决定阻力衰减速度。数值越小震荡晃动越持久，数值越大越粘滞。(推荐: 0.15 ~ 0.45)',
-      default: 0.285,
-    },
-    {
-      key: 'overshootMultiplier',
-      type: 'number',
-      title: '🌀 [Physics] Momentum Multiplier / 惯性冲量倍率',
-      description: 'Impulse factor applied to release speed. Higher values fling nodes further away. (Recommended: 1.5 - 6.0)\n甩出节点时的初速度倍数。数值越大甩得越远。(推荐: 1.5 ~ 6.0)',
-      default: 3.6,
-    },
-    {
-      key: 'maxSpeed',
-      type: 'number',
-      title: '🌀 [Physics] Maximum Speed Clamp / 极速钳制',
-      description: 'Caps maximum release velocity to prevent nodes from flying off-screen. (Recommended: 15.0 - 60.0)\n限制节点甩出时的最高线速度，防止节点瞬间飞出屏幕。(推荐: 15 ~ 60)',
-      default: 32.0,
-    },
-    {
-      key: 'minTriggerSpeed',
-      type: 'number',
-      title: '🎯 [Trigger] Minimum Trigger Speed / 最低触发速度',
-      description: 'Minimum release velocity required to activate spring momentum. Slower releases place nodes statically.\n松开鼠标时的线速度阈值。低于此速度视为精准定位放置，不触发弹簧。',
-      default: 1.0,
-    },
-    {
-      key: 'minDragDist',
-      type: 'number',
-      title: '🎯 [Trigger] Minimum Drag Distance / 最低拖拽距离',
-      description: 'Minimum drag distance (px) required. Prevents accidental node shaking during regular clicks.\n拖拽的像素距离阈值，防止单击节点时误触发晃动。',
-      default: 7.0,
+  function unmountGraph() {
+    if (graphApi) {
+      graphApi.destroy('graph view closed');
+      graphApi = null;
     }
-  ];
-
-  // 3. 安全同步配置（带类型校验）
-  function syncSettings() {
-    if (!window.logseq || !logseq.settings) return;
-    const s = logseq.settings;
-    if (s.stiffness !== undefined && !isNaN(Number(s.stiffness))) {
-      CONFIG.stiffness = Number(s.stiffness);
-    }
-    if (s.damping !== undefined && !isNaN(Number(s.damping))) {
-      CONFIG.damping = Number(s.damping);
-    }
-    if (s.overshootMultiplier !== undefined && !isNaN(Number(s.overshootMultiplier))) {
-      CONFIG.overshootMultiplier = Number(s.overshootMultiplier);
-    }
-    if (s.maxSpeed !== undefined && !isNaN(Number(s.maxSpeed))) {
-      CONFIG.maxSpeed = Number(s.maxSpeed);
-    }
-    if (s.minTriggerSpeed !== undefined && !isNaN(Number(s.minTriggerSpeed))) {
-      CONFIG.minTriggerSpeed = Number(s.minTriggerSpeed);
-    }
-    if (s.minDragDist !== undefined && !isNaN(Number(s.minDragDist))) {
-      CONFIG.minDragDist = Number(s.minDragDist);
-    }
-    console.log('[FluidSpring] Settings synced:', CONFIG);
   }
 
-  let observer = null;
-  let scanRafId = null;
-  const teardownRegistry = new Set();
-
-  const topWin = window.parent || window;
-  let topDoc = null;
-  try {
-    topDoc = topWin.document;
-  } catch (e) {
-    topDoc = window.document;
-  }
-
-  function setupGraphCanvas(canvas) {
-    if (canvas.__lsFluidSpringMounted) return;
-    canvas.__lsFluidSpringMounted = true;
-
-    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-    if (!gl) return;
-
-    let isPressing = false;
-    let isSpringing = false;
-    let dragTrail = [];
-    let animFrameId = null;
-    let startX = 0, startY = 0;
-
-    const locationStateMap = new Map();
-
-    const trackMatrixData = (location, tx, ty) => {
-      if (!isPressing || !location) return;
-      let state = locationStateMap.get(location);
-      if (!state) {
-        state = { initX: tx, initY: ty, maxDelta: 0 };
-        locationStateMap.set(location, state);
-      } else {
-        const delta = Math.hypot(tx - state.initX, ty - state.initY);
-        if (delta > state.maxDelta) state.maxDelta = delta;
-      }
-    };
-
-    const origUniformMatrix3fv = gl.uniformMatrix3fv;
-    gl.uniformMatrix3fv = function (location, transpose, data) {
-      if (data && data.length >= 9) trackMatrixData(location, data[6], data[7]);
-      return origUniformMatrix3fv.apply(this, arguments);
-    };
-
-    const origUniformMatrix4fv = gl.uniformMatrix4fv;
-    gl.uniformMatrix4fv = function (location, transpose, data) {
-      if (data && data.length >= 16) trackMatrixData(location, data[12], data[13]);
-      return origUniformMatrix4fv.apply(this, arguments);
-    };
-
-    const emitPointerEvent = (type, x, y, buttons) => {
-      try {
-        const event = new topWin.PointerEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          view: topWin,
-          clientX: x,
-          clientY: y,
-          screenX: x,
-          screenY: y,
-          button: 0,
-          buttons: buttons,
-          pointerId: 1,
-          pointerType: 'mouse',
-          isPrimary: true,
-        });
-        event.__lsSpringInjected = true;
-        canvas.dispatchEvent(event);
-      } catch (e) {}
-    };
-
-    const killSpring = () => {
-      if (animFrameId) {
-        topWin.cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-      }
-      isSpringing = false;
-    };
-
-    const handlePointerDown = (e) => {
-      if (e.__lsSpringInjected || e.button !== 0) return;
-      if (isSpringing) {
-        killSpring();
-        emitPointerEvent('pointerup', e.clientX, e.clientY, 0);
-        e.stopImmediatePropagation();
-        e.preventDefault();
-        return;
-      }
-      isPressing = true;
-      locationStateMap.clear();
-      startX = e.clientX;
-      startY = e.clientY;
-      dragTrail = [{ x: e.clientX, y: e.clientY, t: topWin.performance.now() }];
-    };
-
-    const handlePointerMove = (e) => {
-      if (e.__lsSpringInjected) return;
-      if (isSpringing) {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-        return;
-      }
-      if (!isPressing) return;
-      const now = topWin.performance.now();
-      dragTrail.push({ x: e.clientX, y: e.clientY, t: now });
-      while (dragTrail.length > 0 && now - dragTrail[0].t > CONFIG.sampleWindow) {
-        dragTrail.shift();
-      }
-    };
-
-    const handlePointerUp = (e) => {
-      if (e.__lsSpringInjected || !isPressing) return;
-      isPressing = false;
-
-      const totalDist = Math.hypot(e.clientX - startX, e.clientY - startY);
-      if (totalDist < CONFIG.minDragDist || dragTrail.length < 2) return;
-
-      let isViewportPan = false;
-      for (const [_, state] of locationStateMap) {
-        if (state.maxDelta > 3.0) {
-          isViewportPan = true;
-          break;
-        }
-      }
-      if (isViewportPan) return;
-
-      const firstSample = dragTrail[0];
-      const lastSample = dragTrail[dragTrail.length - 1];
-      const dt = (lastSample.t - firstSample.t) || 16.67;
-      let vx = ((lastSample.x - firstSample.x) / dt) * 16.67;
-      let vy = ((lastSample.y - firstSample.y) / dt) * 16.67;
-      let speed = Math.hypot(vx, vy);
-
-      if (speed < CONFIG.minTriggerSpeed) return;
-
-      e.stopImmediatePropagation();
-      e.preventDefault();
-
-      if (speed > CONFIG.maxSpeed) {
-        vx = (vx / speed) * CONFIG.maxSpeed;
-        vy = (vy / speed) * CONFIG.maxSpeed;
-      }
-
-      isSpringing = true;
-
-      const targetX = lastSample.x + vx * CONFIG.overshootMultiplier;
-      const targetY = lastSample.y + vy * CONFIG.overshootMultiplier;
-
-      let currX = lastSample.x;
-      let currY = lastSample.y;
-      let prevTime = topWin.performance.now();
-
-      const loop = (currentTime) => {
-        if (!isSpringing) return;
-
-        const rawDt = Math.min(currentTime - prevTime, 32.0);
-        prevTime = currentTime;
-
-        const subDt = (rawDt / 2) / 16.667;
-        for (let i = 0; i < 2; i++) {
-          const ax = -CONFIG.stiffness * (currX - targetX) - CONFIG.damping * vx;
-          const ay = -CONFIG.stiffness * (currY - targetY) - CONFIG.damping * vy;
-          vx += ax * subDt;
-          vy += ay * subDt;
-          currX += vx * subDt;
-          currY += vy * subDt;
-        }
-
-        emitPointerEvent('pointermove', currX, currY, 1);
-
-        const currentSpeed = Math.hypot(vx, vy);
-        const distToTarget = Math.hypot(currX - targetX, currY - targetY);
-
-        if (currentSpeed < CONFIG.stopSpeed && distToTarget < CONFIG.stopDistance) {
-          killSpring();
-          emitPointerEvent('pointerup', currX, currY, 0);
-          return;
-        }
-
-        animFrameId = topWin.requestAnimationFrame(loop);
-      };
-
-      animFrameId = topWin.requestAnimationFrame(loop);
-    };
-
-    canvas.addEventListener('pointerdown', handlePointerDown, { capture: true });
-    topWin.addEventListener('pointermove', handlePointerMove, { capture: true, passive: false });
-    topWin.addEventListener('pointerup', handlePointerUp, { capture: true, passive: false });
-
-    const teardown = () => {
-      killSpring();
-      try {
-        gl.uniformMatrix3fv = origUniformMatrix3fv;
-        gl.uniformMatrix4fv = origUniformMatrix4fv;
-        canvas.removeEventListener('pointerdown', handlePointerDown, { capture: true });
-        topWin.removeEventListener('pointermove', handlePointerMove, { capture: true });
-        topWin.removeEventListener('pointerup', handlePointerUp, { capture: true });
-      } catch (e) {}
-      delete canvas.__lsFluidSpringMounted;
-      teardownRegistry.delete(teardown);
-    };
-
-    teardownRegistry.add(teardown);
-  }
-
-  function scanAndMount() {
-    if (!topDoc) return;
-    const canvases = Array.from(topDoc.querySelectorAll('canvas')).filter(c => {
-      return (c.clientWidth > 250 && c.clientHeight > 250) &&
-             (c.closest('.graph-canvas, #global-graph, .page-graph, .cp__right-sidebar'));
-    });
-    canvases.forEach(setupGraphCanvas);
-  }
-
-  function throttledScan() {
-    if (scanRafId) return;
-    scanRafId = topWin.requestAnimationFrame(() => {
-      scanAndMount();
-      scanRafId = null;
-    });
-  }
-
-  function initObserver() {
-    scanAndMount();
-
-    observer = new topWin.MutationObserver((mutations) => {
-      let shouldCheck = false;
-      for (let i = 0; i < mutations.length; i++) {
-        if (mutations[i].addedNodes.length > 0) {
-          shouldCheck = true;
-          break;
-        }
-      }
-      if (shouldCheck) throttledScan();
-    });
-
-    observer.observe(topDoc.body, { childList: true, subtree: true });
-  }
-
-  function destroyAll() {
-    console.log('[FluidSpring] Cleaning up and unloading plugin...');
-    if (scanRafId) {
-      topWin.cancelAnimationFrame(scanRafId);
-      scanRafId = null;
-    }
-    if (observer) {
-      observer.disconnect();
-      observer = null;
-    }
-    for (const teardown of teardownRegistry) {
-      teardown();
-    }
-    teardownRegistry.clear();
-    console.log('[FluidSpring] Fully unloaded.');
-  }
-
-  function main() {
+  // -------------------------------------------------------------------------
+  // 节点点击 → 在 Logseq 里打开页面
+  // -------------------------------------------------------------------------
+  function activateNode(node) {
+    if (!node) return;
+    const L = window.logseq;
+    if (!L) return;
+    const name = node.label;
+    const uuid = node.uuid;
     try {
-      initObserver();
-    } catch (err) {
-      console.error('[FluidSpring] Init error:', err);
+      // 优先按 uuid 跳（更精确，页名可能被改名过）
+      if (uuid && L.App && typeof L.App.pushState === 'function') {
+        L.App.pushState('page', { name }, {});
+        return;
+      }
+      if (L.App && typeof L.App.pushState === 'function' && name) {
+        L.App.pushState('page', { name }, {});
+      }
+    } catch (e) {
+      console.warn('[GFI] 跳转失败', e);
     }
   }
 
-  // 4. 规范注册与挂载
+  // -------------------------------------------------------------------------
+  // 视图开关监听
+  // -------------------------------------------------------------------------
+  // Logseq 自己的重渲染会让 #global-graph 短暂消失（几帧到几十毫秒）。
+  // 一发现不在就拆掉的话，会白跑一次数据拉取、还会把已经沉降好的布局重置，
+  // 视觉上就是一次闪烁。所以要求连续若干次扫描都缺席才真的拆。
+  const ABSENT_SCANS_TO_UNMOUNT = 3;
+  let absentScans = 0;
+
+  function scan() {
+    scanTimer = null;
+    try {
+      if (graphRootPresent()) {
+        // 陈旧实例守卫。
+        // ⚠ 判据是【容器】是否还连着，不是 root —— React 重渲染 #global-graph 时
+        //   会重建其子节点，把我们的容器清掉，而 root 元素本身仍然连着。
+        //   不清理的话 boot() 的 `if (instance) return instance` 会返回这个死实例，
+        //   结果是【第二次进入图谱什么都不挂载，露出原生图谱】。
+        if (graphApi && !graphApi.alive) {
+          graphApi.destroy('overlay detached');
+          graphApi = null;
+        }
+        absentScans = 0;
+        mountGraph();
+      } else if (graphApi) {
+        if (++absentScans >= ABSENT_SCANS_TO_UNMOUNT) {
+          absentScans = 0;
+          unmountGraph();
+        } else {
+          // ⚠ 必须自己续上下一次扫描。
+          //   scheduleScan 只由 DOM 变动触发，而"根节点消失"这件事只产生一次变动 ——
+          //   不主动重排的话 absentScans 会永远停在 1，unmountGraph 永不执行，
+          //   于是残留一个陈旧实例，下次进入图谱就挂不上了。
+          scheduleScan();
+        }
+      }
+    } catch (e) {
+      console.error('[GFI] scan 出错', e);
+    }
+  }
+
+  function scheduleScan() {
+    if (scanTimer !== null) return;
+    // 合并到 setTimeout —— 用插件 iframe 的 rAF 是不安全的（iframe 可能隐藏）
+    scanTimer = setTimeout(scan, SCAN_THROTTLE_MS);
+  }
+
+  function startObserver() {
+    scan();
+    observer = new GFI.topWin.MutationObserver(scheduleScan);
+    observer.observe(GFI.topDoc.body, { childList: true, subtree: true });
+  }
+
+  function stopObserver() {
+    if (observer) { observer.disconnect(); observer = null; }
+    if (scanTimer !== null) { clearTimeout(scanTimer); scanTimer = null; }
+  }
+
+  // -------------------------------------------------------------------------
+  // 启动
+  // -------------------------------------------------------------------------
+  function applySettings(s) {
+    GFI.syncSettings(s || {});
+  }
+
+  // config.js 通过这个回调把「配置已升级」写回 Logseq 设置，
+  // 这样下次启动就不会重复重置（也避免 config.js 直接依赖 logseq API）
+  GFI.onFreshSettings = function onFreshSettings(values) {
+    try {
+      if (window.logseq && window.logseq.updateSettings && values) {
+        window.logseq.updateSettings(values);
+      }
+    } catch (e) {
+      console.warn('[GFI] 写回配置失败', e);
+    }
+  };
+
+  function start() {
+    try {
+      applySettings(window.logseq && window.logseq.settings);
+      startObserver();
+    } catch (e) {
+      console.error('[GFI] 启动失败', e);
+    }
+  }
+
   if (typeof logseq !== 'undefined' && logseq.ready) {
     if (logseq.beforeunload) {
       logseq.beforeunload(async () => {
-        destroyAll();
+        stopObserver();
+        unmountGraph();
       });
     }
 
     logseq.ready().then(() => {
-      // 注册标准合规的配置项
-      logseq.useSettingsSchema(settingsSchema);
-
-      // 读取初始配置
-      syncSettings();
-
-      // 监听变更
-      logseq.onSettingsChanged(() => {
-        syncSettings();
-      });
-
-      // 避开启动峰值执行初始化
-      setTimeout(main, 300);
+      try {
+        logseq.useSettingsSchema(GFI.settingsSchema);
+        applySettings(logseq.settings);
+        logseq.onSettingsChanged((s) => {
+          const wasNative = GFI.getGraph() && GFI.getGraph().nativeMode;
+          applySettings(s);
+          const g = GFI.getGraph();
+          if (g && !!GFI.config.useNativeGraph !== !!wasNative) {
+            g.setNativeMode(!!GFI.config.useNativeGraph);
+          }
+        });
+      } catch (e) {
+        console.error('[GFI] 设置注册失败', e);
+      }
+      setTimeout(start, 300);
     }).catch(console.error);
   } else {
-    setTimeout(main, 300);
+    setTimeout(start, 300);
   }
 })();

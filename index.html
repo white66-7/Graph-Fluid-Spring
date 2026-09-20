@@ -2,11 +2,50 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Logseq Graph Fluid Spring</title>
+  <title>Logseq Graph Fluid Inertia</title>
 </head>
 <body>
-  <!-- 优先加载本地内置的 SDK -->
+  <!--
+    经典 <script>，无 defer、无 type="module" ——
+    按文档顺序同步执行，顺序即依赖顺序。
+
+    ⚠ 不要改成 type="module"：模块是延迟执行的，而 src/main.js 之前的每个文件
+      都依赖前一个已经挂好 GFI.xxx。
+  -->
+
+  <!-- Logseq 插件 SDK（本地内置） -->
   <script src="./lsplugin.user.js"></script>
+
+  <!-- 1. 地基 -->
+  <script src="./src/ns.js"></script>
+  <script src="./src/config.js"></script>
+  <script src="./src/spatial.js"></script>
+  <script src="./src/data.js"></script>
+
+  <!-- 2. 模拟 -->
+  <script src="./src/physics.js"></script>
+  <script src="./src/effects.js"></script>
+
+  <!-- 3. 呈现 -->
+  <script src="./src/camera.js"></script>
+  <script src="./src/renderer.js"></script>
+  <script src="./src/toolbar.js"></script>
+
+  <!-- 4. 输入与编排 -->
+  <script src="./src/interaction.js"></script>
+  <script src="./src/timeline.js"></script>
+  <script src="./src/overlay.js"></script>
+  <script src="./src/datasource.js"></script>
+
+  <!-- 5. 启动（必须最后） -->
+  <script src="./src/main.js"></script>
   <script src="./index.js"></script>
+
+  <!--
+    诊断探针 probe-data.js 【刻意不在这里加载】。
+    它会在每次启动时往控制台打印一大段 schema 探测结果、并往宿主窗口挂
+    __GFI_PROBE__。开发 schema 时需要它，发布版不需要 —— 会污染用户控制台。
+    要用的话手动加一行 <script src="./probe-data.js"></script> 即可。
+  -->
 </body>
 </html>
