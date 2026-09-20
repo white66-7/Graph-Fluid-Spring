@@ -1,7 +1,9 @@
+<h1 align="center">Graph Fluid Spring</h1>
 <h1 align="center">Graph Inertia</h1>
 
 <p align="center">
-  <b>给 Logseq 图谱装上真正的物理引擎 —— 会呼吸、有惯性、能倒带。</b><br>
+  <b>Dual-track momentum physics for Logseq Graph View.</b>
+  <b>Logseq 图谱的物理引擎</b><br>
   <sub>A living, force-simulated knowledge graph for Logseq.</sub>
 </p>
 
@@ -10,7 +12,7 @@
 </p>
 
 <p align="center">
-  <sub><b>悬停</b> — 只显示该节点与它直接相连的邻居的名字</sub>
+  <sub><b>悬停</b> — 只显示该节点与相邻节点名称</sub>
 </p>
 
 <p align="center">
@@ -18,75 +20,52 @@
 </p>
 
 <p align="center">
-  <sub><b>时间旅行</b> — 节点随波前逐个生长，每个新节点都会向外过冲一下再收回</sub>
+  <sub><b>时间旅行</b> — 节点逐个过冲后收回</sub>
 </p>
 
 ---
 
+## ✨ Features
 ## 为什么需要它
-
-Logseq 自带的图谱**不是一张活的图，而是一张画好的静态图**。
-
-打开图谱的瞬间，它就把所有节点的坐标一次性算完、永久冻结：
-
+摆脱静态感
 ```clojure
 _ (.stop simulation)
 ticks (layout-tick-count (count nodes) view-mode)]
 (dotimes [_ ticks] (.tick simulation))
 ```
 
-`.stop` 之后力导向模拟就被丢弃了 —— 没有持续计算，也没有任何外力能再作用到节点上。
+* 🛑 **Hard-Brake Viewport**: Dragging the canvas stops immediately upon release (zero sliding, zero drift).
+* 🌊 **Fluid Node Momentum**: Flinging nodes triggers smooth momentum with a gentle overshoot ($\zeta \approx 0.48$) before resting stably.
+* 🛡️ **Click Safe**: Normal single clicks and page navigation are 100% unaffected.
+`.stop` 之后力导向模拟被丢弃
+由此带来：
+- **拖不动**
+- **时间旅行表现为透明度切换。** 
 
-由此带来两个后果：
-
-- **拖不动真东西。** 你拖拽节点时，它只是让节点沿一条预设轨迹移动、邻居按固定权重跟随。那不是物理，是动画。
-- **时间旅行只是透明度切换。** 拖动时间轴时，底层只改变节点的 `alpha`。新节点在**已经冻结的坐标上突然淡入**，所以看起来像幻灯片逐帧显影，而不是生长。
-
-Graph Inertia 接管了整个图谱渲染，换成一套**逐帧运行**的力导向模拟。
-
----
-
-## 特性
-
-### 🌌 活的布局
-节点从随机位置散开、互相推挤、然后缓缓沉降。沉降后会**自动停机**（不空转、不耗电），你一交互它立刻苏醒。
-
-### 🍮 带惯性的拖拽
-甩出一个节点，它会带着惯性飞出去、过冲，然后被邻居慢慢拉回。松手时的落点由**解析阻尼振子**给出，并在最后一段**加权混合交还模拟** —— 所以没有硬着陆的"啪"一下。
-
-### 💥 节点弹出
-新出现的节点不会从 0 线性放大，而是按欠阻尼振子向外过冲（默认 33%）再收回。
-
-### 🌊 时间旅行
-基于页面的创建时间，可以回放整张图的生长过程。关键区别在于：**波前扫过时，近处节点先被推动、远处的后动** —— 这是相机缩放永远做不到的。
-
-前进时波前把旧节点向外推开；**倒退时波前把节点向内吸**，形成内爆。同一份代码，一个符号。
-
-### 🎯 引力波
-时间轴推进时，从变化发生处向外扩散一道斥力波前。每个节点在波前扫过时恰好被击中一次，幅度随距离衰减、并**随节点度数递减** —— 所以枢纽节点只是微微一颤，边缘叶子会被甩出去。
-
-### 🏷 聚焦式标签
-常态下只标注度数最高的一批节点；**鼠标悬浮时，只显示该节点和它直接相连的邻居**。
-
-### 🔄 随时切回原生图谱
-设置里一个开关，立刻回到 Logseq 自带的图谱。这是安全阀 —— 本插件永远不该让你卡在里面。
+Graph Inertia 接管图谱渲染，换成**逐帧运行**的力导向模拟。
 
 ---
 
+## ⚙️ Configuration
 ## 安装
 
 **Logseq Marketplace**：搜索 `Graph Inertia` → Install。
 
 **手动**：从 [Releases](https://github.com/white66-7/logseq-graph-inertia/releases) 下载 zip → `设置` → `插件` → `Load unpacked plugin`。
 
+Fine-tune physics parameters in the `CONFIG` object at the top of `index.js`:
 **要求**：Logseq 0.10+ / 2.x（DB 版）
-
 ---
 
 ## 设置
 
+| Parameter | Default | Description |
 | 设置 | 默认 | 说明 |
 | :--- | :---: | :--- |
+| `stiffness` | `0.092` | **Spring Tension**: Higher values snap back faster |
+| `damping` | `0.285` | **Friction Loss**: Controls oscillation (higher = less bounce) |
+| `overshootMultiplier` | `3.6` | **Throw Distance**: Momentum glide distance multiplier |
+| `maxSpeed` | `32.0` | **Speed Cap**: Prevents nodes from flying off-screen |
 | **使用原生图谱** | 关 | 回退到 Logseq 内置图谱 |
 | **斥力强度** | `-0.10` | 整体疏密。绝对值越大越舒展 |
 | **连接线长度** | `82` | 决定看起来是"图谱"还是"毛球" |
@@ -102,18 +81,14 @@ Graph Inertia 接管了整个图谱渲染，换成一套**逐帧运行**的力�
 
 ### ⚠ 改参数前请先读这段
 
-`斥力强度` 和 `速度保留率` 是**实测标定**出来的，不是拍脑袋定的。它们的关系高度非线性 —— 每个节点在其斥力半径内通常有几十个邻居，贡献同向叠加，所以凭直觉估算会差一个数量级。
+`斥力强度` 和 `速度保留率` 是**实测**出来。它们的关系非线性 —— 每个节点在其斥力半径内通常有几十个邻居，贡献同向叠加。
 
-改动幅度建议控制在 ±50% 以内。要大幅调整的话，仓库里带了标定工具：
+改动幅度建议控制在 ±50% 以内。大幅调整，请借助仓库的标定工具：
 
 ```bash
 node test/quick-cal.js 200 300    # 二分搜索出合适的斥力强度
 node test/headless-sim.js         # 56 项回归测试
 ```
-
-**阻尼陷阱**：离散振子的振荡每帧衰减 `√retain`。`0.94` 的衰减率是 0.9695，而振荡周期只有约 11 帧 —— 阻尼比低到 0.06，图谱会来回振荡并在能量耗尽时**冻在某个随机相位上**。这就是为什么默认值是 `0.80` 而不是更"慵懒"的数字。
-
----
 
 ## 它是怎么工作的
 
@@ -130,14 +105,12 @@ Pixi/Canvas 原生图谱  ──(接管)──►  自绘 Canvas2D
 ```
 
 **技术要点**：
-
-- **手写模拟器**，不依赖 d3-force。原因之一是 d3 的 UMD 构建**不是自包含的**（还要 quadtree / dispatch / timer 三个文件）；之二是斥力用的是**恒定幅值**而非真库仑力 —— 后者在二维下净力对数发散，图会一路膨胀到散架，这是二维力导向布局的经典陷阱。
-- **统一空间网格**：斥力截断、碰撞检测、鼠标命中、视口剔除四处复用。有硬截断距离时，精确求和比 Barnes-Hut 更准也更快。
+- **手写模拟器**，不依赖 d3-force。
+- **统一空间网格**：斥力截断、碰撞检测、鼠标命中、视口剔除四处复用。
 - **定长数组存储**（SoA），整个生命周期零分配 —— 这对 60fps 至关重要。
-- **辉光绝不用 `shadowBlur`**：那是逐次绘制的 CPU 高斯模糊，慢 30~100×。改用预渲染的离屏径向渐变精灵 + `'lighter'` 混合叠加。
-
 ---
 
+## 📦 Installation
 ## 开发
 
 ```bash
@@ -146,6 +119,8 @@ node test/quick-cal.js        # 参数标定
 node test/repro-blowup.js     # 布局发散时的诊断
 ```
 
+* **Logseq Marketplace**: Search for `Graph Fluid Spring` and click **Install**.
+* **Manual**: Download the zip from [Releases](https://github.com/white66-7/Graph-Fluid-Spring/releases) -> `Settings` -> `Plugins` -> `Load unpacked plugin`.
 物理、网格、数据、特效四个模块**完全不碰 DOM**，所以能在 Node 里直接测，不需要启动 Logseq —— 这让大多数回归都能在秒级发现。
 
 **调试探针**（重新加载插件后，在主窗口控制台执行）：
@@ -155,24 +130,15 @@ __GFI__.diag()          // 渲染/挂载/相机的完整状态 + 自动故障判
 __GFI__.dump()          // 布局分布：包围盒、离质心距离、度数直方图、全部节点清单
 __GFI__.calibrate()     // 当前图谱的 p50 边长与各阶段耗时
 __GFI__.tlState()       // 时间轴状态
-__GFI__.setRender({...})// 实时调外观，不用重载插件
 __GFI__.native(true)    // 切回原生图谱
 ```
-
----
-
-## 已知限制
-
-- **只接管全局图谱**（`#/graph`）。页面侧边栏的局部图谱仍由 Logseq 渲染。
-- **依赖 DB 版图谱的 schema**（`:block/title`、`:block/created-at` 等）。文件版（markdown）图谱未测试。
-- 节点数超过约 5000 时会自动降级细节（关闭部分辉光与标签），这是刻意的 —— 保证帧率优先。
-
 ---
 
 ## 致谢
 
-图谱的视觉语言参考了 [Obsidian](https://obsidian.md) 的图谱视图；力导向参数区间部分参考了 Logseq 自身 `frontend.extensions.graph.pixi.logic` 的实现。
+图谱视觉参考了 [Obsidian](https://obsidian.md) 的图谱；力导向参数区间部分参考了 Logseq 自身 `frontend.extensions.graph.pixi.logic` 的实现。
 
 ## License
 
+[MIT License](./LICENSE) © 2026 white66-7
 [MIT](./LICENSE) © 2026 white66-7
