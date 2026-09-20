@@ -1,4 +1,3 @@
-<h1 align="center">Graph Fluid Spring</h1>
 <h1 align="center">Graph Inertia</h1>
 
 <p align="center">
@@ -121,9 +120,9 @@ node test/repro-blowup.js     # 布局发散时的诊断
 
 * **Logseq Marketplace**: Search for `Graph Fluid Spring` and click **Install**.
 * **Manual**: Download the zip from [Releases](https://github.com/white66-7/Graph-Fluid-Spring/releases) -> `Settings` -> `Plugins` -> `Load unpacked plugin`.
-物理、网格、数据、特效四个模块**完全不碰 DOM**，所以能在 Node 里直接测，不需要启动 Logseq —— 这让大多数回归都能在秒级发现。
+物理、网格、数据、特效四个模块不碰 DOM，让大多数回归在秒级发现。
 
-**调试探针**（重新加载插件后，在主窗口控制台执行）：
+**调试探针**（在主窗口控制台执行）：
 
 ```js
 __GFI__.diag()          // 渲染/挂载/相机的完整状态 + 自动故障判定
