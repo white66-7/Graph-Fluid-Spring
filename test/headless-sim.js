@@ -592,6 +592,79 @@ section('9. 类型过滤（页面 / 标签 / 日记）');
 })();
 
 // ===========================================================================
+section('10. 特效空转剪枝 —— 计数器必须精确，隐藏的节点不许复活');
+// ===========================================================================
+// 这一节守两件事：
+//   1. updatePops / updateFades 的 O(n) 全表扫描现在靠 popCount / fadeCount
+//      早退。计数器一旦漂移（只增不减），早退就永远不生效 —— 性能优化静默失效，
+//      而且没有任何报错。所以必须直接断言它归零。
+//   2. pop 与 fade 会争抢 scaleMul / renderAlpha / simWeight。pop 的收尾分支
+//      在节点已经淡出之后执行的话，会把 simWeight 推回 1 ——
+//      于是出现一个【看不见却仍然留在模拟里】的节点：照样进 activeMask、
+//      照样对邻居施力，永远不退场。
+(function testEffectIdle() {
+  const demo = GFI.DataSource.demo(80, { seed: 5 });
+  const D8 = GFI.Data.build(demo.nodes, demo.links, null);
+  const sim8 = GFI.Physics.create(D8, GFI.config.physics);
+  const fx8 = GFI.Effects.create(D8, sim8);
+  const DT8 = GFI.DT;
+
+  // ---- 静止时 update() 必须是纯 no-op ----
+  const s0 = D8.scaleMul[3], a0 = D8.renderAlpha[3], w0 = D8.simWeight[3];
+  for (let k = 0; k < 30; k++) fx8.update(DT8);
+  check('无激活特效时 update() 不改动任何状态',
+    D8.scaleMul[3] === s0 && D8.renderAlpha[3] === a0 && D8.simWeight[3] === w0);
+  check('空闲时计数器为 0', fx8.popCount === 0 && fx8.fadeCount === 0,
+    `pop=${fx8.popCount} fade=${fx8.fadeCount}`);
+
+  const steps = Math.ceil(GFI.config.pop.maxDuration * 60) + 8;
+
+  // ---- 正常一轮：揭示 → 跑完 ----
+  const i = 3;
+  fx8.beginReveal(i, 0);
+  check('reveal 后 popCount 为 1', fx8.popCount === 1, `popCount=${fx8.popCount}`);
+  for (let k = 0; k < steps; k++) fx8.update(DT8);
+  check('pop 结束后 popCount 精确归零', fx8.popCount === 0, `popCount=${fx8.popCount}`);
+  check('pop 结束后节点完全可见',
+    D8.visible[i] === 1 && D8.simWeight[i] === 1 && Math.abs(D8.scaleMul[i] - 1) < 1e-6,
+    `visible=${D8.visible[i]} simWeight=${D8.simWeight[i]} scaleMul=${D8.scaleMul[i].toFixed(4)}`);
+
+  // ---- 关键回归：pop 还没走完就隐藏 ----
+  const j = 7;
+  fx8.beginReveal(j, 0);
+  fx8.update(DT8);                       // 让 pop 真正开始（popT 变成正数）
+  fx8.beginHide(j);
+  for (let k = 0; k < steps; k++) fx8.update(DT8);
+  check('隐藏节点不会在 pop 收尾时被复活（权重必须留在 0）',
+    D8.visible[j] === 0 && D8.simWeight[j] === 0 && D8.renderAlpha[j] === 0,
+    `visible=${D8.visible[j]} simWeight=${D8.simWeight[j]} alpha=${D8.renderAlpha[j]}`);
+  check('淡出 + pop 结束后两个计数器都归零',
+    fx8.popCount === 0 && fx8.fadeCount === 0,
+    `pop=${fx8.popCount} fade=${fx8.fadeCount}`);
+
+  // ---- 同一个节点反复 reveal / hide（不是时间轴走的那条路，但状态机必须自洽）----
+  const m = 11;
+  fx8.beginReveal(m, 0);
+  fx8.beginReveal(m, 0);                 // 重复 reveal 不能重复计数
+  check('重复 reveal 不重复计数', fx8.popCount === 1, `popCount=${fx8.popCount}`);
+  fx8.beginReveal(m, 0);
+  fx8.beginHide(m);
+  fx8.beginReveal(m, 0);                 // 清掉进行中的淡出，计数要还回去
+  for (let k = 0; k < steps; k++) fx8.update(DT8);
+  check('反复 reveal/hide 后计数器不漂移',
+    fx8.popCount === 0 && fx8.fadeCount === 0,
+    `pop=${fx8.popCount} fade=${fx8.fadeCount}`);
+
+  // ---- 撤消淡出（cancelHide）时计数要还回去 ----
+  const q = 13;
+  fx8.beginHide(q);
+  fx8.update(DT8);
+  check('cancelHide 前 fadeCount 为 1', fx8.fadeCount === 1, `fadeCount=${fx8.fadeCount}`);
+  fx8.cancelHide(q);
+  check('cancelHide 后 fadeCount 归零', fx8.fadeCount === 0, `fadeCount=${fx8.fadeCount}`);
+})();
+
+// ===========================================================================
 // 结果
 // ===========================================================================
 console.log(`\n${'═'.repeat(60)}`);

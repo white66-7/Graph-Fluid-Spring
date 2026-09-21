@@ -115,6 +115,119 @@
     return doc.querySelector('#global-graph');
   }
 
+  // ===========================================================================
+  // 原生 Pixi 渲染器的【暂停 / 恢复】
+  // ===========================================================================
+  // 为什么需要：
+  //   把原生 canvas 设成 visibility:hidden 之后，浏览器确实不再【合成】它 ——
+  //   但 Logseq 的 Pixi ticker 依然每帧执行 renderer.render({container: stage})，
+  //   把全部节点 / 边的 draw call 照常提交给 GPU。这部分开销我们一点都看不见
+  //   （它画在一块不显示的画布上），节点越多越贵。停掉它才是真的省下来。
+  //
+  // 怎么拿到那个 Application：
+  //   Pixi v8 有一个【官方扩展点】—— Application.init() 在创建完 renderer、
+  //   装好 ResizePlugin / TickerPlugin 之后会调用
+  //       globalThis.__PIXI_APP_INIT__(app, VERSION)
+  //   （Pixi 源码里的 ApplicationInitHook）。我们在宿主窗口上挂这个函数，
+  //   就能拿到之后创建的每一个 Application —— 不需要猜任何私有字段。
+  //   实证：Logseq 2.0.1 → resources/app.asar → /js/main.js，搜
+  //   `__PIXI_APP_INIT__` 与 `ApplicationInitHook` 都能直接看到这段。
+  //
+  // ⚠ 时机：必须在 Application 创建【之前】挂上，所以是在模块加载时安装，
+  //   而不是等到 mount()。插件 iframe 在 Logseq 启动时就加载了，而图谱组件
+  //   【每次进入图谱都会新建一个 Application】，所以能覆盖到。
+  //   唯一漏掉的情况是「插件重载时人已经站在图谱页面上」—— 那个 App 早就建好了，
+  //   这时退化成今天的行为：只隐藏、不暂停。不报错、不影响任何功能。
+  //
+  // ⚠ 只动 ticker（app.stop / app.start），绝不去碰 visibility / display ——
+  //   后者会破坏 Pixi 的尺寸测量，见本文件开头。
+  //
+  // 顺带确认过：Logseq 2.0.1 的打包产物里只有图谱这一个模块引入了 Pixi，
+  //   所以不会误伤别的组件；而且下面还按 canvas 归属过滤了一次。
+  const capturedApps = [];        // 所有见过的 Application
+  const pausedApps = [];          // 被我们停掉的 Application（恢复时只动这些）
+  let captureHook = null;
+  let captureInstalled = false;
+  let takeoverRoot = null;        // 非空 = 我们正盖在这个 root 上
+
+  function installPixiCapture() {
+    if (captureInstalled) return;
+    const w = GFI.topWin;
+    if (!w) return;
+    try {
+      const prev = w.__PIXI_APP_INIT__;
+      captureHook = function (app, version) {
+        try { if (app && app.canvas) capturedApps.push(app); } catch (e) {}
+        // 接管期间新建的 App：它的 canvas 要等 init() 的 then 回调才挂进 DOM，
+        // 所以推迟一个【宏任务】再匹配 —— 微任务会早于那个 then。
+        if (takeoverRoot) {
+          try { GFI.topWin.setTimeout(pauseNativeRenderers, 0); } catch (e) {}
+        }
+        // 万一以后有别人也用了这个钩子，链上去，不做独占地盘的事
+        if (typeof prev === 'function') { try { prev(app, version); } catch (e) {} }
+      };
+      w.__PIXI_APP_INIT__ = captureHook;
+      captureInstalled = true;
+    } catch (e) { /* 跨域等异常 —— 静默退回"只隐藏不暂停" */ }
+  }
+
+  /** 捡出还活着的 App（destroy() 会把 renderer 置 null） */
+  function liveApps() {
+    for (let i = capturedApps.length - 1; i >= 0; i--) {
+      if (!capturedApps[i].renderer) capturedApps.splice(i, 1);
+    }
+    return capturedApps;
+  }
+
+  /**
+   * 停掉盖在 root 上的原生渲染循环。
+   * app.stop() 就是 TickerPlugin 装在 Application 上的方法，内部是 ticker.stop()
+   * —— 它会 cancelAnimationFrame，让 Pixi 降到【零 rAF 回调】。
+   * 用公开方法而不是直接摸 ticker，是为了不依赖 Pixi 的内部字段名。
+   * @returns {number} 本次停了几个
+   */
+  function pauseNativeRenderers() {
+    if (!takeoverRoot) return 0;
+    let k = 0;
+    for (const app of liveApps()) {
+      let c = null;
+      try { c = app.canvas; } catch (e) { continue; }
+      if (!c || !takeoverRoot.contains(c)) continue;   // 只动我们盖住的那块画布
+      try {
+        app.stop();
+        if (pausedApps.indexOf(app) < 0) pausedApps.push(app);
+        k++;
+      } catch (e) {}
+    }
+    return k;
+  }
+
+  /** 把交还给宿主的那些渲染循环重新拉起来 */
+  function resumeNativeRenderers() {
+    for (const app of pausedApps) {
+      try { app.start(); } catch (e) {}
+    }
+    pausedApps.length = 0;
+  }
+
+  /**
+   * 插件真的要卸载时才摘钩子（由 index.js 的 beforeunload 调用）。
+   * ⚠ 不能放在 unmount() 里：unmount 之后紧接着就会 mount（离开图谱再进来），
+   *   而新图谱的 Application 是在我们下一次 mount 之前就建好的 ——
+   *   中间摘钩子会整整漏掉一个 App。
+   */
+  function releasePixiCapture() {
+    const w = GFI.topWin;
+    if (captureInstalled && w) {
+      try { if (w.__PIXI_APP_INIT__ === captureHook) delete w.__PIXI_APP_INIT__; } catch (e) {}
+    }
+    captureInstalled = false;
+    captureHook = null;
+    capturedApps.length = 0;
+    pausedApps.length = 0;
+    takeoverRoot = null;
+  }
+
   /**
    * @param {HTMLElement} root #global-graph
    * @returns {object|null}
@@ -214,9 +327,21 @@
           nativeToolbar.style.pointerEvents = nativeVisible ? nativeState.toolbarPointer : 'none';
         }
         container.style.display = nativeVisible ? 'none' : '';
+        // 画板盖住了，它的渲染循环就不该继续跑 —— 见上面「原生 Pixi 渲染器」一节
+        takeoverRoot = nativeVisible ? null : root;
+        if (nativeVisible) resumeNativeRenderers();
+        else pauseNativeRenderers();
       },
 
+      /** 被我们暂停的原生渲染器数量（诊断用） */
+      get pausedNativeRenderers() { return pausedApps.length; },
+      /** 见过的原生 Application 总数（诊断用） */
+      get capturedNativeRenderers() { return capturedApps.length; },
+
       unmount() {
+        // 交还宿主：循环该跑还得跑起来，否则切回原生图谱是一片死画面
+        resumeNativeRenderers();
+        takeoverRoot = null;
         try { if (observer) observer.disconnect(); } catch (e) {}
         observer = null;
         try { root.style.position = nativeState.rootPosition; } catch (e) {}
@@ -243,5 +368,12 @@
     return api;
   }
 
-  GFI.Overlay = { mount, findRoot, injectStyles, readBackground, STYLE_ID };
+  // ⚠ 钩子必须在任何 Application 创建之前装好 —— 所以放在模块加载时，
+  //   而不是等 mount()。装不上（跨域等）就静默退回"只隐藏不暂停"。
+  installPixiCapture();
+
+  GFI.Overlay = {
+    mount, findRoot, injectStyles, readBackground, STYLE_ID,
+    releasePixiCapture, pauseNativeRenderers, resumeNativeRenderers,
+  };
 })(window.GFI);

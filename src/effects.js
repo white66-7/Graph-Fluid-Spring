@@ -92,13 +92,21 @@
       if (i < 0 || i >= n) return;
       D.visible[i] = 1;
       D.wantVisible[i] = 1;
+      // ⚠ popCount 是 updatePops 的【早退依据】，必须恰好等于激活的 pop 数。
+      //   同一个节点在 pop 结束前又被 reveal 一次是真实存在的路径（先淡出到
+      //   不可见、再被揭示回来），无条件 ++ 会让计数只增不减 ——
+      //   那样早退永远不生效，等于白加了一个守卫。
+      if (D.popT[i] !== D.popT[i]) popCount++;
       D.popT[i] = -Math.max(0, delay || 0);   // 负数 = 延迟倒计时中
       D.popDur[i] = popDuration();
       D.scaleMul[i] = 1;
       D.renderAlpha[i] = 0;                   // 由 pop 的时间轴负责渐入
       D.simWeight[i] = 0;                     // 权重渐入，避免突然给邻居一个力
+      // 这里会直接清掉进行中的淡出（时间轴走的是 cancelHide 那条路，到不了这里），
+      // 但既然清了就得把 fadeCount 一并还回去 —— 否则它会只增不减，
+      // updateFades 的早退守卫就永远失效。
+      if (D.fadeT[i] === D.fadeT[i]) fadeCount--;
       D.fadeT[i] = NaN;
-      popCount++;
     };
 
     fx.beginHide = function beginHide(i) {
@@ -267,17 +275,30 @@
     };
 
     function updatePops(dt) {
+      // 空转剪枝：下面是 O(n) 全表扫描，而绝大多数帧里一个在弹的节点都没有
+      // （图谱沉降完之后 popCount 恒为 0）。不剪的话每个 substep 白扫一遍 n ——
+      // 3000 节点 × 每帧 3 个 substep 就是 9000 次无效迭代。
+      // 计数器的精确性由 beginReveal（去重 ++）/ updatePops（--）配对保证。
+      if (popCount <= 0) return;
+
       const { amp, omega, zeta, fadeInTime, simWeightRamp } = cfg.pop;
       const decayRate = Math.max(0.0001, zeta * omega);
       const wd = omega * Math.sqrt(Math.max(0, 1 - zeta * zeta));
       const rampTime = Math.max(0.001, simWeightRamp);
 
       const popT = D.popT, popDur = D.popDur, scaleMul = D.scaleMul,
-        renderAlpha = D.renderAlpha, simWeight = D.simWeight;
+        renderAlpha = D.renderAlpha, simWeight = D.simWeight, fadeT = D.fadeT;
       // 只触碰激活的节点 —— 通常是几十到几百个
       for (let i = 0; i < n; i++) {
         let t = popT[i];
         if (t !== t) continue;                    // NaN = 未激活
+
+        // 正在淡出的节点由 updateFades 独占 scaleMul / renderAlpha / simWeight。
+        // 两个动画同时写这三个数组会互相覆盖，而且 pop 的收尾分支会把 simWeight
+        // 推回 1 —— 于是一个【看不见却仍然留在模拟里】的节点出现了：它照样进
+        // activeMask、照样对邻居施力，永远不退场。所以 pop 在这里让位，
+        // 并把自己从计数里摘掉（必须摘，否则早退守卫永远失效）。
+        if (fadeT[i] === fadeT[i]) { popT[i] = NaN; popCount--; continue; }
 
         if (t < 0) {                              // 延迟倒计时
           t += dt;
@@ -306,6 +327,10 @@
     }
 
     function updateFades(dt) {
+      // 同 updatePops 的空转剪枝。fadeCount 的配对：beginHide（已在淡出则提前
+      // return）/ cancelHide / 这里的收尾分支，三者正好覆盖全部增减路径。
+      if (fadeCount <= 0) return;
+
       const fadeTime = Math.max(0.001, cfg.timeline.hideFadeTime);
       const shrink = cfg.timeline.hideShrink;
       const fadeT = D.fadeT, renderAlpha = D.renderAlpha, simWeight = D.simWeight,

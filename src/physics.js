@@ -274,14 +274,20 @@
       const rc = cfg.isolatedRing;
       if (!rc || !rc.enabled) return;
 
-      // 连通节点的质心与最大半径
-      let cx = 0, cy = 0, k = 0;
+      // 连通节点的质心 + 孤立节点计数 —— 一趟扫完。
+      //
+      // 原来是三趟独立的全表扫描（质心 / 最大半径 / 计数），而"没有任何孤立
+      // 节点"是最常见的情况，那时三趟全是白跑：算完的质心和 maxR 直接没人用。
+      // 合并之后只剩一趟，而且没有孤立节点时连"最大半径"那一趟都不用做。
+      let cx = 0, cy = 0, k = 0, count = 0;
       for (let i = 0; i < n; i++) {
-        if (deg[i] === 0 || !activeMask[i]) continue;
+        if (!activeMask[i]) continue;
+        if (deg[i] === 0) { count++; continue; }
         cx += x[i]; cy += y[i]; k++;
       }
       if (k === 0) return;                       // 全是孤立节点，没有"外圈"可言
       cx /= k; cy /= k;
+      if (count === 0) { isoCount = 0; return; } // 没有孤立节点 —— 后面都不必算
 
       let maxR = 0;
       for (let i = 0; i < n; i++) {
@@ -301,10 +307,6 @@
       //   于是永远在原地打转 —— 实测 12 个节点全挤在 76° 的弧里，
       //   而不是像理想的那样散在整圈。
       //   现在只在【孤立节点数量变化】时重新分配（很少发生）。
-      let count = 0;
-      for (let i = 0; i < n; i++) if (deg[i] === 0 && activeMask[i]) count++;
-      if (count === 0) { isoCount = 0; return; }
-
       if (count !== isoCount) {
         isoCount = count;
         let k = 0;

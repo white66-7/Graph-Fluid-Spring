@@ -203,6 +203,10 @@
       logseq.beforeunload(async () => {
         stopObserver();
         unmountGraph();
+        // 插件真的要走了才摘 Pixi 钩子。
+        // ⚠ 不能挪进 unmountGraph()：图谱视图来来去去都会走那条路径，
+        //   而摘掉钩子会整整漏掉下一个 Application（详见 overlay.js 的说明）。
+        try { GFI.Overlay.releasePixiCapture(); } catch (e) {}
       });
     }
 

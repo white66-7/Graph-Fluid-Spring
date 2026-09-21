@@ -82,6 +82,10 @@
     // ---- LOD 自适应 ----
     const lodCfg = cfg.lod;
     const frameTimes = new Float32Array(lodCfg.sampleFrames);
+    // 排序暂存区。原先是 Array.prototype.slice + sort —— 每帧一次 60 元素
+    // 数组分配外加一遍比较器调用，是主循环里唯一的稳定分配源（GC 抖动的来源）。
+    // 换成预分配缓冲 + 插入排序：样本只有 30~60 个且近似有序，零分配。
+    const ftScratch = new Float32Array(lodCfg.sampleFrames);
     let ftIdx = 0, ftFilled = 0, goodFrames = 0;
 
     function pushFrameTime(ms) {
@@ -92,8 +96,16 @@
 
     function medianFrameTime() {
       if (!ftFilled) return 0;
-      const a = Array.prototype.slice.call(frameTimes, 0, ftFilled).sort((x, y) => x - y);
-      return a[a.length >> 1];
+      // 复制 + 插入排序一趟做完（用 subarray/slice 复制的话每帧又多一个视图对象）。
+      // 帧耗时序列近似有序，插入排序正好是最优解。
+      ftScratch[0] = frameTimes[0];
+      for (let i = 1; i < ftFilled; i++) {
+        const v = frameTimes[i];
+        let j = i - 1;
+        while (j >= 0 && ftScratch[j] > v) { ftScratch[j + 1] = ftScratch[j]; j--; }
+        ftScratch[j + 1] = v;
+      }
+      return ftScratch[ftFilled >> 1];
     }
 
     function updateLod() {
@@ -509,6 +521,12 @@
         } : null,
         自动适配: { pending: autoFitPending, fitK: +fitK.toFixed(4) },
         模拟: { alpha: +P.sim.alpha.toFixed(5), tick: P.sim.tickCount, 网格: P.sim.grid.cols + '×' + P.sim.grid.rows },
+        // 原生 Pixi 渲染器：捕获 0 个说明钩子装晚了（进图谱之前插件就已经加载过
+        // 一次的那种情况），这时原生画板只是被盖住、渲染循环还在空跑
+        原生渲染: {
+          已捕获: overlay.capturedNativeRenderers,
+          已暂停: overlay.pausedNativeRenderers,
+        },
         // ⚠ 这些是耗时，单位 ms。Chromium 把 performance.now() 钳到 100µs 精度，
         //   所以几十个节点的渲染所有阶段都会四舍五入成 0 —— 那【不代表没画】。
         //   要判断有没有画出来，看下面 DOM 里的 canvasAttr 和这里的 绘制节点/边 整数计数。
@@ -532,6 +550,7 @@
       console.log('数据/模拟:', out.数据, out.模拟);
       console.log('绘制:', out.绘制);
       console.log('上一帧耗时(ms，受 100µs 计时精度限制):', out.上一帧耗时);
+      console.log('原生渲染器:', out.原生渲染);
       console.log('DOM:', out.DOM);
       console.groupEnd();
 
