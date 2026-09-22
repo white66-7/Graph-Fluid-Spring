@@ -1,20 +1,22 @@
 /*
- * GFI.Timeline — 时间旅行
+ * GFI.Timeline — 时间旅行（Obsidian 细胞分裂动态模型）
  * ===========================================================================
  * 可见性判定只有一次比较：  !(createdAt[i] > cutoff)
  *   因为 createdAt 缺失存的是 NaN，而 NaN > cutoff 恒为 false
  *   → 没有时间戳的节点永远可见，无需存在性分支。
- *   3000 次比较约 5µs，滑块拖动时每帧跑都无所谓。
  *
- * ── 两条关键设计 ──
+ * ── Obsidian 风格核心机制：母体细胞分裂（Cell Budding） ──
  *
- * 1. 所有节点始终存在于模拟中，不可见的只是被排除出力循环。
- *    反面做法（可见时才加进模拟）对时间旅行是错的：过去的样子会被未来的布局
- *    塑造，同一段历史每次拖回去都会长得不一样。
+ * 1. 细胞分裂式诞生：
+ *    新节点出生时不再摆放在抽象的“邻居几何中心”，而是直接紧贴其引用的母节点
+ *    （母体）诞生。
  *
- * 2. 淡出时【保持节点在模拟里，只把力的权重线性降到 0】，而不是立刻移除。
- *    立刻移除会让邻居"咯噔"跳一下。重热要在淡出【开始】时做，
- *    这样邻居在它还看得见的时候就开始收拢；在淡出结束时才重热会看到明显的塌陷。
+ * 2. 动量守恒与后坐力（Action-Reaction）：
+ *    子节点诞生瞬间被赋予背离母体的喷射初速度；同时母节点承受反向后坐力推力。
+ *    原本长度接近 0 的连线被瞬间拉伸紧绷，产生强烈的弹簧回弹与团簇震颤。
+ *
+ * 3. 首帧全受力：
+ *    simWeight 直接从 1.0 开始，连线拉力第 1 帧全力介入，杜绝“隐形中弹完”的现象。
  */
 (function (GFI) {
   'use strict';
@@ -40,13 +42,11 @@
     let lastPulseAt = -1e9;
 
     // =======================================================================
-    // 脉冲
+    // 脉冲（可选的背景扰动波）
     // =======================================================================
-    /** 计算一波变化的质心，以此为波源 —— 波才像是被这一步时间旅行引起的 */
     function changedCentroid() {
       let cx = 0, cy = 0, k = 0;
       for (let i = 0; i < D.n; i++) {
-        // 目标可见性与当前不一致 = 这一步需要过渡的节点
         if (D.wantVisible[i] === D.visible[i]) continue;
         cx += D.x[i]; cy += D.y[i]; k++;
       }
@@ -56,28 +56,22 @@
 
     function maybePulse(forward, origin, viewportWorldHeight) {
       const now = GFI.util.now();
-      // 节流是下限，真正的约束是下面那条"上一道波必须走完"
       if (now - lastPulseAt < cfg.timeline.pulseThrottleMs) return;
-      // ⚠ 必须等上一道波走完再发下一道。
-      //   否则几道波同时在飞，观感就是"前一个效果还没完，下一个就直接来了"。
       if (fx.pulsesActive && fx.pulsesActive()) return;
 
       lastPulseAt = now;
       const o = origin || GFI.Data.centroid(D, true, _centroid);
 
-      // 波只跑到图谱边缘就够了。
-      // 之前写死 2600：图谱只有 ~700 单位时，波 0.3 秒就扫完了却要继续空跑 1.08 秒，
-      // 白白占着脉冲池、逼着后面的波叠上来。
       const b = GFI.Data.bounds(D, false);
       const radius = Math.max(
-        cfg.physics.linkDistance * 4,     // 极小图谱的兜底，别让波一出生就死
+        cfg.physics.linkDistance * 4,
         Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * 0.5 * cfg.shock.maxRadiusFactor
       );
 
       fx.pulse({
         ox: o.x,
         oy: o.y,
-        sign: forward ? 1 : -1,          // 倒退时 J 取负 → 波前把节点向内吸（内爆）
+        sign: forward ? 1 : -1,
         viewportWorldHeight,
         maxRadius: radius,
       });
@@ -85,47 +79,87 @@
     }
 
     // =======================================================================
-    // 揭示锚点
-    // 节点的首帧绝不能出现在随机坐标上 —— 那会让"生长"看起来像乱码。
+    // 揭示锚点：Obsidian 母体细胞分裂计算
     // =======================================================================
     function anchorFor(i, visCentroid) {
-      const rc = cfg.timeline;
-      // 1. 可见邻居的质心（最好）
-      let cx = 0, cy = 0, k = 0;
       const s = D.adjStart[i], e = D.adjStart[i + 1];
+
+      let parentIdx = -1;
+      let maxDeg = -1;
+
+      // 寻找度数最高且已处于可见状态的邻居，作为主要分裂母体
       for (let p = s; p < e; p++) {
         const j = D.adjList[p];
         if (!D.visible[j]) continue;
-        cx += D.x[j]; cy += D.y[j]; k++;
+        if (D.deg[j] > maxDeg) {
+          maxDeg = D.deg[j];
+          parentIdx = j;
+        }
       }
-      if (k > 0) {
-        return [cx / k + jitter(i, 21, rc.revealAnchorJitter),
-                cy / k + jitter(i, 22, rc.revealAnchorJitter)];
+
+      // 情况 1：存在母节点 —— 紧贴母节点向外侧爆破喷射
+      if (parentIdx !== -1) {
+        const px = D.x[parentIdx];
+        const py = D.y[parentIdx];
+
+        // 基础方向：沿母体背离全图质心的外展方向
+        const cx = visCentroid && visCentroid.k > 0 ? visCentroid.x : px;
+        const cy = visCentroid && visCentroid.k > 0 ? visCentroid.y : py;
+        let angle = Math.atan2(py - cy, px - cx);
+
+        if (Math.abs(px - cx) < 1e-3 && Math.abs(py - cy) < 1e-3) {
+          angle = jitter(i, 30, Math.PI);
+        } else {
+          // 叠加大自然般的有机散射角（±45度散开）
+          angle += jitter(i, 31, 0.78);
+        }
+
+        const dirX = Math.cos(angle);
+        const dirY = Math.sin(angle);
+
+        // 仅偏移 3 像素出生，视觉呈现出纯正的从母节点裂变而出的质感
+        return {
+          parentIdx,
+          x: px + dirX * 3.0,
+          y: py + dirY * 3.0,
+          dirX,
+          dirY,
+        };
       }
-      // 2. 图谱质心的外围 —— 这些节点从边缘飞进来，效果很好看
+
+      // 情况 2：无母节点的孤立节点 —— 从外圈向内滑入
       if (visCentroid && visCentroid.k > 0) {
-        return [visCentroid.x + jitter(i, 23, rc.revealFringeJitter),
-                visCentroid.y + jitter(i, 24, rc.revealFringeJitter)];
+        const angle = jitter(i, 32, Math.PI);
+        const dist = cfg.physics.linkDistance * 2.2 + jitter(i, 33, 40);
+        return {
+          parentIdx: -1,
+          x: visCentroid.x + Math.cos(angle) * dist,
+          y: visCentroid.y + Math.sin(angle) * dist,
+          dirX: -Math.cos(angle),
+          dirY: -Math.sin(angle),
+        };
       }
-      // 3. 什么都没有（第一次揭示）
-      return [jitter(i, 25, rc.revealFringeJitter), jitter(i, 26, rc.revealFringeJitter)];
+
+      // 情况 3：初始创世节点（图谱完全为空）
+      const angle = jitter(i, 34, Math.PI);
+      const r = 20 + jitter(i, 35, 30);
+      return {
+        parentIdx: -1,
+        x: Math.cos(angle) * r,
+        y: Math.sin(angle) * r,
+        dirX: Math.cos(angle),
+        dirY: Math.sin(angle),
+      };
     }
 
     // =======================================================================
     // 设置 cutoff
     // =======================================================================
-    /**
-     * @param {number} ms 绝对毫秒时间戳
-     * @param {object} [opts] { pulse:boolean, viewportWorldHeight:number, silent:boolean }
-     * @returns {number} 发生状态翻转的节点数
-     */
     tl.setCutoff = function setCutoff(ms, opts) {
       opts = opts || {};
-      // ⚠ 必须先把旧值抓出来再赋值 —— 原先在赋值之后才读 tl.cutoff 做方向判断，
-      //   那时它已经是新值了，ms > ms 恒为 false，时间永远被判成"倒退"。
       const prevCutoff = opts.prevCutoff !== undefined ? opts.prevCutoff : tl.cutoff;
 
-      const changed = GFI.Data.applyCutoff(D, ms);   // 只写 wantVisible
+      const changed = GFI.Data.applyCutoff(D, ms);
       tl.cutoff = ms;
       if (!changed) return 0;
 
@@ -133,48 +167,45 @@
       const origin = changedCentroid();
       const visCentroid = GFI.Data.centroid(D, false, _centroid);
 
-      // 先决定要不要发脉冲 —— 揭示的径向错峰要以波源为基准。
-      // 只揭示一两个节点不值得发一波：否则滑块微动都会激起冲击波，观感就"急"了。
       const doPulse = opts.pulse !== false && !opts.silent
         && changed >= (cfg.timeline.pulseMinReveal || 1);
       if (doPulse) maybePulse(forward, origin, opts.viewportWorldHeight || 0);
 
       let revealed = 0, hidden = 0;
-      const waveSpeed = Math.max(1, cfg.pop.radialWaveSpeed);
-      const maxDelay = cfg.pop.maxRadialDelay;
-      // 无脉冲时按 createdAt 排名错峰，总时长封顶
-      const idxDelayStep = D.n > 0 ? Math.min(0.012, cfg.pop.maxIndexDelay / D.n) : 0;
-      let revealIndex = 0;
 
       for (let i = 0; i < D.n; i++) {
         const want = D.wantVisible[i];
         const isFading = D.fadeT[i] === D.fadeT[i];
 
         if (want === 1 && D.visible[i] === 0) {
-          // ---- 揭示 ----
-          const [ax, ay] = anchorFor(i, visCentroid);
-          D.x[i] = ax; D.y[i] = ay;
-          D.vx[i] = 0; D.vy[i] = 0;
-          D.simWeight[i] = 0;
+          // ---- 揭示：Obsidian 母体分裂与反冲爆发 ----
+          const spawn = anchorFor(i, visCentroid);
+          D.x[i] = spawn.x;
+          D.y[i] = spawn.y;
 
-          let delay = 0;
-          if (doPulse && origin) {
-            // 径向错峰：节点随波前到达而逐个弹出。
-            // 这是整个设计里最好看的一瞬 —— 它让波看起来是因果的，而不是装饰的。
-            const d = Math.hypot(ax - origin.x, ay - origin.y);
-            delay = Math.min(maxDelay, d / waveSpeed);
-          } else {
-            delay = revealIndex * idxDelayStep;
+          // 🌟 1. 子节点爆发速度（向外猛冲）
+          const kickSpeed = 22.0 + jitter(i, 41, 4.0);
+          D.vx[i] = spawn.dirX * kickSpeed;
+          D.vy[i] = spawn.dirY * kickSpeed;
+
+          // 🌟 2. 母节点后坐力反冲（牛顿第三定律）
+          // 子节点向外射出的同时，母节点被向后推退，连线弹簧瞬间被拉得极紧并产生回弹振荡
+          if (spawn.parentIdx !== -1) {
+            const pIdx = spawn.parentIdx;
+            const recoilMass = 1 / (1 + 0.18 * Math.sqrt(D.deg[pIdx]));
+            const recoil = kickSpeed * 0.42 * recoilMass;
+            D.vx[pIdx] -= spawn.dirX * recoil;
+            D.vy[pIdx] -= spawn.dirY * recoil;
           }
-          revealIndex++;
 
-          fx.beginReveal(i, delay);
+          // 🌟 3. 力的权重首帧全开，连线弹簧立即介入工作
+          D.simWeight[i] = 1.0;
+
+          // 🌟 4. 取消延迟错峰，诞生即刻爆发
+          fx.beginReveal(i, 0);
           revealed++;
         } else if (want === 1 && D.visible[i] === 1 && isFading) {
           // ---- 撤销淡出 ----
-          // 来回拖滑块时高频出现：节点刚要消失就又被要求显示。
-          // 不救的话它会淡到消失并卡死（fadeT 走完把 visible 置 0，
-          // 而这次 cutoff 变化已经处理完了，没有后续事件再揭示它）。
           if (fx.cancelHide(i)) revealed++;
         } else if (want === 0 && D.visible[i] === 1 && !isFading) {
           // ---- 隐藏 ----
@@ -184,10 +215,7 @@
       }
 
       if (revealed || hidden) {
-        // 播放中用温和的重热幅度 —— 见 config.reheat.timelinePlay 的说明。
-        // 手动拖滑块则用较大幅度，那样响应才跟手。
         const revealHeat = opts.playing ? cfg.reheat.timelinePlay : cfg.reheat.cutoff;
-        // 重热要在淡出【开始】时做，让邻居趁节点还看得见就开始收拢
         if (hidden) sim.reheat(Math.min(cfg.reheat.fadeStart, revealHeat));
         if (revealed) sim.reheat(revealHeat);
         if (hooks.onChange) hooks.onChange({ revealed, hidden, cutoff: ms });
@@ -195,24 +223,17 @@
       return changed;
     };
 
-    /**
-     * 类型显示开关（0=页面 1=标签 2=日记 3=对象 4=属性）。
-     * 走的是 wantVisible 这条既有通路 —— 于是淡出/弹出/重热整套机制都能复用，
-     * 不用在渲染层再引入"部分隐藏"的概念。
-     */
     tl.setKindOn = function setKindOn(kindIdx, on) {
       const k = kindIdx | 0;
       if (k < 0 || k >= D.kindOn.length) return 0;
       const v = on ? 1 : 0;
       if (D.kindOn[k] === v) return 0;
       D.kindOn[k] = v;
-      // 打开 = 揭示（波前向外），关闭 = 收起（波前向内）
       return tl.setCutoff(tl.cutoff, { forward: !!on, pulse: true });
     };
 
     tl.isKindOn = function isKindOn(kindIdx) { return !!D.kindOn[kindIdx | 0]; };
 
-    /** 用 0..duration 的滑块值设置（与 Logseq 原生滑块的语义一致） */
     tl.setSliderValue = function setSliderValue(v, opts) {
       if (!range) return 0;
       const prev = tl.cutoff;
@@ -245,13 +266,12 @@
     tl.setPlaying = function setPlaying(p) {
       if (!range) return;
       if (p && tl.sliderValue() >= range.duration - 1) {
-        // 已经到末尾 —— 从头开始
         const prev = tl.cutoff;
         tl.setCutoff(range.min, { forward: false, pulse: true });
         tl.setCutoff(range.min, { forward: true, pulse: false, prevCutoff: prev });
       }
       tl.playing = !!p;
-      lastPulseAt = -1e9;          // 允许立刻发第一个脉冲
+      lastPulseAt = -1e9;
       if (hooks.onPlayingChange) hooks.onPlayingChange(tl.playing);
     };
 
@@ -283,10 +303,7 @@
       }
     };
 
-    // =======================================================================
-    // 初始化
-    // =======================================================================
-    // 起始状态：全部可见（与原生一致），用户按播放才从头演化
+    // 起始状态：全部可见
     D.wantVisible.fill(1, 0, D.n);
 
     return tl;
