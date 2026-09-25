@@ -206,6 +206,10 @@
     // 数据层
     // =======================================================================
     data: {
+      // 🌟 系统节点是否删去（默认 false：不删，保留在图谱中）
+      hideSystemJournal: false,
+      hideSystemPages: false,
+
       hideClassIdents: [
         'logseq.class/Tag',
         'logseq.class/Whiteboard',
@@ -259,6 +263,31 @@
       title: '🔄 使用原生图谱 / Use Native Graph',
       description: '回退到 Logseq 内置的图谱视图。\nFall back to Logseq\'s built-in graph.',
       default: false,
+    },
+    // 🌟 1. 自定义 Journal 系统节点（默认 false：不删）
+    {
+      key: 'hideSystemJournal',
+      type: 'boolean',
+      title: '📅 删去 Journal 系统节点 / Hide Journal System Node',
+      description: '是否从图谱中删去 Journal 系统节点（默认关：不删，保留展示）。\nDelete/hide the Journal system node? (default false: keep)',
+      default: false,
+    },
+    // 🌟 2. 自定义 Page/Pages 系统节点（默认 false：不删）
+    {
+      key: 'hideSystemPages',
+      type: 'boolean',
+      title: '📄 删去 Page/Pages 系统节点 / Hide Page System Node',
+      description: '是否从图谱中删去 Page / Pages 系统节点（默认关：不删，保留展示）。\nDelete/hide the Page/Pages system node? (default false: keep)',
+      default: false,
+    },
+    // 🌟 3. 自定义过滤其他节点名称
+    {
+      key: 'hideNames',
+      type: 'string',
+      input: 'textarea',
+      title: '🚫 自定义过滤名称 / Custom Excluded Names',
+      description: '填入需过滤的节点名称，用逗号或换行分隔。',
+      default: '',
     },
     {
       key: 'charge',
@@ -351,14 +380,17 @@
     shockMagnitude: () => GFI.configDefaults.shock.magnitude,
     timelapseDuration: () => GFI.configDefaults.timeline.baseDurationSec,
     labelMaxRatio: () => GFI.configDefaults.render.labelMaxRatio,
+    hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
+    hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
+    hideNames: () => GFI.configDefaults.data.hideNames.join(', '),
   };
   for (const item of GFI.settingsSchema) {
     const bind = SCHEMA_BINDINGS[item.key];
     if (bind) item.default = bind();
   }
 
-  // 🌟 配置版本号升级到 9，确保覆盖本地图谱的所有旧缓存值
-  GFI.CFG_VERSION = 9;
+  // 🌟 配置版本号升级到 10，确保覆盖旧缓存
+  GFI.CFG_VERSION = 10;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -413,6 +445,49 @@
     c.timeline.baseDurationSec = pick('timelapseDuration', d.timeline.baseDurationSec);
     c.render.labelMaxRatio = pick('labelMaxRatio', d.render.labelMaxRatio);
 
+    // -----------------------------------------------------------------------
+    // 🌟 自定义 Journal、Page/Pages 系统节点显隐（默认不删）
+    // -----------------------------------------------------------------------
+    c.data.hideSystemJournal = fresh ? d.data.hideSystemJournal : !!s.hideSystemJournal;
+    c.data.hideSystemPages = fresh ? d.data.hideSystemPages : !!s.hideSystemPages;
+
+    // 解析 hideNames
+    let userNames = d.data.hideNames.slice();
+    if (!fresh && s.hideNames !== undefined && s.hideNames !== null) {
+      if (Array.isArray(s.hideNames)) {
+        userNames = s.hideNames.map((x) => String(x).trim()).filter(Boolean);
+      } else if (typeof s.hideNames === 'string') {
+        userNames = s.hideNames
+          .split(/[,\n]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+      }
+    }
+
+    let classIdents = d.data.hideClassIdents.slice();
+
+    // 1. 处理 Journal：仅当用户明确开启开关时才删除，否则强制保留
+    if (c.data.hideSystemJournal) {
+      if (!classIdents.includes('logseq.class/Journal')) classIdents.push('logseq.class/Journal');
+      if (!userNames.includes('Journal')) userNames.push('Journal');
+    } else {
+      classIdents = classIdents.filter((x) => x !== 'logseq.class/Journal');
+      userNames = userNames.filter((x) => x.toLowerCase() !== 'journal');
+    }
+
+    // 2. 处理 Page/Pages：仅当用户明确开启开关时才删除，否则强制保留
+    if (c.data.hideSystemPages) {
+      if (!classIdents.includes('logseq.class/Page')) classIdents.push('logseq.class/Page');
+      if (!userNames.includes('Page')) userNames.push('Page');
+      if (!userNames.includes('Pages')) userNames.push('Pages');
+    } else {
+      classIdents = classIdents.filter((x) => x !== 'logseq.class/Page');
+      userNames = userNames.filter((x) => x.toLowerCase() !== 'page' && x.toLowerCase() !== 'pages');
+    }
+
+    c.data.hideClassIdents = classIdents;
+    c.data.hideNames = userNames;
+
     if (fresh && GFI.onFreshSettings) {
       try {
         GFI.onFreshSettings({
@@ -427,9 +502,12 @@
           flingMomentum: c.drag.flingMomentum,
           shockMagnitude: c.shock.magnitude,
           timelapseDuration: c.timeline.baseDurationSec,
+          hideSystemJournal: c.data.hideSystemJournal,
+          hideSystemPages: c.data.hideSystemPages,
+          hideNames: c.data.hideNames.join(', '),
         });
       } catch (e) {}
     }
     return c;
   };
-})(window.GFI);
+})(window.GFI = window.GFI || {});
