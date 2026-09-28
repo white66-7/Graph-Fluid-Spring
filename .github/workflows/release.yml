@@ -1,0 +1,64 @@
+name: Build and Release Logseq Plugin
+
+on:
+  # 方式 1：本地推送以 'v' 或 'V' 开头的 tag 时自动触发（例如 git push origin V1.0.3）
+  push:
+    tags:
+      - 'v*'
+      - 'V*'
+  # 方式 2：GitHub 网页端手动点击 Run workflow 触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号(例 V1.0.3)'
+        required: true
+        default: 'V1.0.3'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Package Logseq Plugin to Zip
+        run: |
+          VERSION="${{ inputs.version || github.ref_name }}"
+
+      - name: Extract Current Version Notes
+        shell: node {0}
+        env:
+          CURRENT_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+
+      # 发布 Release 并上传 Zip 插件包
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          name: "${{ inputs.version || github.ref_name }}"
+          # 仅读取当前版本的说明
+          body_path: CURRENT_RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          files: ${{ env.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
