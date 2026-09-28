@@ -39,23 +39,60 @@ jobs:
       - name: Build plugin
         run: npm run build
 
+      # 1. 规范打包 Logseq 插件为 Zip
       - name: Package Logseq Plugin to Zip
         run: |
           VERSION="${{ inputs.version || github.ref_name }}"
+          ZIP_NAME="Graph-Fluid-Spring-${VERSION}.zip"
+          
+          # 创建临时打包目录
+          mkdir -p release-pkg
+          
+          # 复制运行时核心文件
+          cp -r dist release-pkg/
+          cp package.json release-pkg/
+          [ -f README.md ] && cp README.md release-pkg/
+          [ -f icon.png ] && cp icon.png release-pkg/
+          [ -f logo.png ] && cp logo.png release-pkg/
+          [ -f LICENSE ] && cp LICENSE release-pkg/
+          
+          # 压缩进 zip 文件
+          cd release-pkg
+          zip -r "../${ZIP_NAME}" ./*
+          cd ..
+          
+          # 把文件名传递给后续步骤
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
+      # 2. 从 CHANGELOG.md 精准截取当前版本说明
       - name: Extract Current Version Notes
         shell: node {0}
         env:
           CURRENT_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
+          const fs = require('fs');
+          if (!fs.existsSync('CHANGELOG.md')) {
+            fs.writeFileSync('CURRENT_RELEASE_NOTES.md', '常规更新与优化');
+            process.exit(0);
+          }
+          const content = fs.readFileSync('CHANGELOG.md', 'utf8');
+          const version = process.env.CURRENT_VERSION.replace(/^[vV]/, '').trim();
+          
+          // 正则匹配：截取对应版本的更新内容
+          const regex = new RegExp(`##\\s*\\[?[vV]?${version}\\]?[^\\n]*\\n([\\s\\S]*?)(?=\\n##|$)`, 'i');
+          const match = content.match(regex);
+          
+          const notes = (match && match[1]) ? match[1].trim() : `Release ${process.env.CURRENT_VERSION}`;
+          fs.writeFileSync('CURRENT_RELEASE_NOTES.md', notes);
+          console.log('--- 提取出的当前版本说明 ---');
+          console.log(notes);
 
-      # 发布 Release 并上传 Zip 插件包
+      # 3. 发布 Release 并上传 Zip 插件包
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version || github.ref_name }}
           name: "${{ inputs.version || github.ref_name }}"
-          # 仅读取当前版本的说明
           body_path: CURRENT_RELEASE_NOTES.md
           draft: false
           prerelease: false
