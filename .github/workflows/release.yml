@@ -1,12 +1,10 @@
 name: Build and Release Logseq Plugin
 
 on:
-  # 方式 1：本地推送以 'v' 或 'V' 开头的 tag 时自动触发（例如 git push origin V1.0.3）
   push:
     tags:
       - 'v*'
       - 'V*'
-  # 方式 2：GitHub 网页端手动点击 Run workflow 触发
   workflow_dispatch:
     inputs:
       version:
@@ -31,40 +29,34 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build plugin
-        run: npm run build
-
-      # 1. 规范打包 Logseq 插件为 Zip
       - name: Package Logseq Plugin to Zip
         run: |
           VERSION="${{ inputs.version || github.ref_name }}"
           ZIP_NAME="Graph-Fluid-Spring-${VERSION}.zip"
-          
-          # 创建临时打包目录
+
           mkdir -p release-pkg
-          
-          # 复制运行时核心文件
-          cp -r dist release-pkg/
+
+          # 复制根目录源文件
+          cp index.html release-pkg/
+          cp index.js release-pkg/
           cp package.json release-pkg/
+          cp lsplugin.user.js release-pkg/
+
+          # 复制 src 目录（包含 camera.js, config.js, data.js 等）
+          cp -r src release-pkg/
+
+          # 复制可选文件
           [ -f README.md ] && cp README.md release-pkg/
-          [ -f icon.png ] && cp icon.png release-pkg/
-          [ -f logo.png ] && cp logo.png release-pkg/
+          [ -f icon.svg ] && cp icon.svg release-pkg/
           [ -f LICENSE ] && cp LICENSE release-pkg/
-          
-          # 压缩进 zip 文件
+
           cd release-pkg
           zip -r "../${ZIP_NAME}" ./*
           cd ..
-          
-          # 把文件名传递给后续步骤
+
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
-      # 2. 从 CHANGELOG.md 精准截取当前版本说明
       - name: Extract Current Version Notes
         shell: node {0}
         env:
@@ -77,17 +69,15 @@ jobs:
           }
           const content = fs.readFileSync('CHANGELOG.md', 'utf8');
           const version = process.env.CURRENT_VERSION.replace(/^[vV]/, '').trim();
-          
-          // 正则匹配：截取对应版本的更新内容
+
           const regex = new RegExp(`##\\s*\\[?[vV]?${version}\\]?[^\\n]*\\n([\\s\\S]*?)(?=\\n##|$)`, 'i');
           const match = content.match(regex);
-          
+
           const notes = (match && match[1]) ? match[1].trim() : `Release ${process.env.CURRENT_VERSION}`;
           fs.writeFileSync('CURRENT_RELEASE_NOTES.md', notes);
           console.log('--- 提取出的当前版本说明 ---');
           console.log(notes);
 
-      # 3. 发布 Release 并上传 Zip 插件包
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
