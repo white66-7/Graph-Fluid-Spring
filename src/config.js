@@ -22,7 +22,13 @@
       chargeDegCap: 8,        // 上述倍率的上限
       distanceMin: 12,        // 软化近距奇点
       distanceMax: 420,       // 斥力截断半径
-      linkDistance: 82,       // 边长
+      // 边长。
+      //   62 → 拥挤度 2.38、屏幕线长 40px
+      //   40 → 拥挤度 1.91、屏幕线长 28px   ← 这里
+      //   32 → 拥挤度 1.74、屏幕线长 25px
+      //   22 → 拥挤度 1.54、屏幕线长 17px（偏挤）
+      // 要调"看起来的疏密"配合 render.nodeSize 一起用。
+      linkDistance: 40,
       linkStrength: 0.3,      // 边刚度
       velocityRetain: 0.80,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
@@ -115,6 +121,9 @@
       maxZoom: 6,
       zoomBase: 1.0012,
       fitPadding: 72,
+      // 沉降后那一次自动适配视野的缓动时长。瞬变会让整个画面"啪"地跳一下 ——
+      // 从种子布局到沉降完的图谱，包围盒能差 40% 以上，那一下很明显。
+      fitAnimMs: 320,
     },
 
     // =======================================================================
@@ -129,6 +138,16 @@
       radiusScale: 0.95,
       radiusMin: 2.0,
       radiusMax: 14,
+      // 节点大小总倍率。这是【真正独立于线长】的那一个旋钮：
+      // 拥挤度 = 最近邻间距 / 节点直径，而间距由 linkDistance 决定、
+      // 直径由这里决定 —— 两个量正交，所以放大节点可以在【完全不动布局】
+      // 的前提下让图读起来更密。
+      // ⚠ 它同时会放大碰撞半径（物理里按 radius 推挤），所以放大到一定程度
+      //   节点会被碰撞顶开、间距跟着变大，拥挤度不再线性跟随 —— 范围上限
+      //   卡在 2.5 就是为了这个。
+      // 1.15 配 linkDistance 40 → 拥挤度 ≈ 1.66（"近但没到挤"）。
+      // 想更密就往上加，2.0 大约到 1.34，2.5 是 1.13（快糊了）。
+      nodeSize: 1.15,
 
       glowRadiusBuckets: [3, 4, 6, 8, 11, 16, 22],
       glowSpread: 2.0,
@@ -154,7 +173,13 @@
       labelHaloWidth: 1.5,
       labelAlpha: 0.8,
       labelMaxRatio: 0.3,
+      // 占位格边长（CSS px）。占位按标签的【整个包围盒】标记，不再只标落点一格，
+      // 所以这个值只决定重叠判定的精细度：调小 = 判定更严、留下的标签更少。
       labelCell: 14,
+      // 标签精灵缓存上限。⚠ 必须【大于最高的 labelCap】（L0 = 240），否则单帧
+      // 就要建比上限更多的精灵，缓存会退化成每帧重建。512 约合两屏的标签量，
+      // 内存量级 ~10-25MB（每张精灵 ≈ 宽×(字号×1.3+2×pad)×dpr²×4 字节）。
+      labelCacheMax: 512,
 
       hoverScale: 1.35,
       selectionRingOffset: 2.5,
@@ -176,7 +201,12 @@
       levels: [
         { maxN: 800,  glow: 'all',      glowMinScale: 0,    labelCap: 240, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
         { maxN: 2200, glow: 'deg2',     glowMinScale: 0,    labelCap: 160, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
-        { maxN: 5000, glow: 'all',      glowMinScale: 0.5,  labelCap: 90,  collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 1, pulses: true },
+        // ⚠ 降档链必须【单调变便宜】。L2 原来写的是 glow:'all'，而 L1 是 'deg2' ——
+        //   于是从 L1 降到 L2、且相机缩放 k ≥ glowMinScale 时，反而给全部叶子
+        //   节点补上了辉光：在"因为太慢所以降档"的那一刻增加了绘制量。
+        //   glow 是纯 fill-rate 开销（半尺寸 spread×rScreen 的 alpha 混合大位图），
+        //   是这个渲染器最贵的一项，绝不能反向。
+        { maxN: 5000, glow: 'deg2',     glowMinScale: 0.5,  labelCap: 90,  collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 1, pulses: true },
         { maxN: Infinity, glow: 'hover', glowMinScale: 1,   labelCap: 40,  collideIter: 0, skipIsolatedCharge: true,  chargeEveryNth: 2, pulses: false },
       ],
       sampleFrames: 30,
@@ -366,6 +396,16 @@
       description: '常态下最多给多少比例的节点显示名字。(default 0.3)',
       default: 0.3,
     },
+    {
+      key: 'nodeSize',
+      type: 'number',
+      title: '🔵 节点大小 / Node Size',
+      description:
+        '节点圆点的大小倍率。调大 = 图看起来更密，且【完全不改动布局】——' +
+        '它和「连接线长度」是两个正交的旋钮：线长决定间距，这里决定直径。' +
+        '范围 0.5~2.5,超过 2.5 节点会被碰撞顶开、反而变松。(default 1.0)',
+      default: 1.0,
+    },
   ];
 
   const SCHEMA_BINDINGS = {
@@ -380,6 +420,7 @@
     shockMagnitude: () => GFI.configDefaults.shock.magnitude,
     timelapseDuration: () => GFI.configDefaults.timeline.baseDurationSec,
     labelMaxRatio: () => GFI.configDefaults.render.labelMaxRatio,
+    nodeSize: () => GFI.configDefaults.render.nodeSize,
     hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
     hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
     hideNames: () => GFI.configDefaults.data.hideNames.join(', '),
@@ -389,8 +430,11 @@
     if (bind) item.default = bind();
   }
 
-  // 🌟 配置版本号升级到 10，确保覆盖旧缓存
-  GFI.CFG_VERSION = 10;
+  // 🌟 11：linkDistance 82 → 40、新增 nodeSize。
+  // ⚠ 提升版本号的【代价】是 fresh 分支会把所有面板设置重置成 configDefaults，
+  //   然后写回 Logseq —— 这是设计用途（换一套新默认值），不是 bug。
+  //   受影响最大的是 hideNames 那个自定义过滤文本框（它只在面板里，config 里没有）。
+  GFI.CFG_VERSION = 11;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -404,6 +448,7 @@
     shockMagnitude: (v) => v >= 0 && v <= 2000,
     timelapseDuration: (v) => v >= 2 && v <= 300,
     labelMaxRatio: (v) => v > 0 && v <= 1,
+    nodeSize: (v) => v >= 0.5 && v <= 2.5,
   };
 
   GFI.syncSettings = function syncSettings(s) {
@@ -444,6 +489,7 @@
     c.shock.magnitude = pick('shockMagnitude', d.shock.magnitude);
     c.timeline.baseDurationSec = pick('timelapseDuration', d.timeline.baseDurationSec);
     c.render.labelMaxRatio = pick('labelMaxRatio', d.render.labelMaxRatio);
+    c.render.nodeSize = pick('nodeSize', d.render.nodeSize);
 
     // -----------------------------------------------------------------------
     // 🌟 自定义 Journal、Page/Pages 系统节点显隐（默认不删）
@@ -502,6 +548,8 @@
           flingMomentum: c.drag.flingMomentum,
           shockMagnitude: c.shock.magnitude,
           timelapseDuration: c.timeline.baseDurationSec,
+          labelMaxRatio: c.render.labelMaxRatio,
+          nodeSize: c.render.nodeSize,
           hideSystemJournal: c.data.hideSystemJournal,
           hideSystemPages: c.data.hideSystemPages,
           hideNames: c.data.hideNames.join(', '),

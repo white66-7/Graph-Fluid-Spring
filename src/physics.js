@@ -40,6 +40,14 @@
     // 活动掩码：simWeight > 0 的节点参与一切力
     const activeMask = new Uint8Array(n);
 
+    // 碰撞搜索半径必须覆盖 r_i + r_j 的最大可能值，而它【不是】固定值：
+    // 半径随度数增长（render.radiusMax=14，再乘 nodeSize）。
+    // 原来这里写的是 collideCell*0.5 = 16 —— 两个高度数节点（r≈9.2）就要求
+    // 18.4 才不漏检，本来就偏小；render.nodeSize 一放大更是直接漏掉大半碰撞，
+    // 表现是节点叠在一起。这里按实际数据取上界，一次 O(n)，之后是常量。
+    let maxNodeR = 0;
+    for (let i = 0; i < n; i++) if (D.radius[i] > maxNodeR) maxNodeR = D.radius[i];
+
     // 孤立节点的固定角向槽位（见 forceIsolatedRing）
     const isoSlot = new Int32Array(n).fill(-1);
     let isoCount = -1;
@@ -388,12 +396,14 @@
 
       const cellStart = collideGrid.cellStart, items = collideGrid.items;
       const inv = collideGrid.inv, gMinX = collideGrid.minX, gMinY = collideGrid.minY;
-      const maxR = cfg.collideCell * 0.5;
 
       for (let it = 0; it < iterations; it++) {
         for (let i = 0; i < n; i++) {
           if (!activeMask[i] || pinMode[i] === PIN_HARD) continue;
           const xi = x[i], yi = y[i], ri = radius[i];
+          // 自己的半径 + 可能遇到的最大半径 = 需要扫描的半边长。
+          // 小节点自动用小框（比原来固定 16 还快），hub 用大框（不漏检）。
+          const maxR = ri + maxNodeR;
 
           let cx0 = ((xi - maxR - gMinX) * inv) | 0;
           let cy0 = ((yi - maxR - gMinY) * inv) | 0;
@@ -500,6 +510,15 @@
     };
 
     sim.isAwake = function isAwake() { return sim.alpha > sim.alphaMin; };
+
+    // 渲染剔除与命中测试复用 chargeGrid，而它平常只在 tick 内部重建 ——
+    // 前提是「模拟睡着 ⇒ 没有任何东西移动」。applyHandoff 会绕过模拟直接写
+    // D.x / D.y，破坏了这个前提；模拟睡着时这条通道让外面能按需把网格刷新回来。
+    // 只在 settle 活跃期间每帧调用（最多几百毫秒），O(n) 可忽略。
+    sim.rebuildGrid = function rebuildGrid() {
+      updateActiveMask();
+      chargeGrid.build(D, activeMask);
+    };
 
     sim.reset = function reset() {
       zeroForces();

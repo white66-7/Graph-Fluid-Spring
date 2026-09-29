@@ -65,6 +65,29 @@ for (const f of ['ns', 'config', 'spatial', 'data', 'physics', 'effects', 'timel
 const GFI = sandbox.GFI;
 const DT = 1 / 60;
 
+// 激波冲量必须【显式给定】，不能靠 config 默认值：
+// config.shock.magnitude 是用户可调项，796a70e 起默认 0（关掉全屏扩散激波），
+// 于是 pulse() 在 `if (mag <= 0) return` 处直接早退，整个第 5 节断言全废、
+// 并且因为 firstHit 为空引发 TypeError 把 6~9 节一起带走。
+// 下面这些断言验的是【波前机制本身】—— 行进波前、距离衰减、度数加权、
+// 环带不重叠 —— 与那个可调幅度无关，所以这里给死一个值。
+// 210 = 这些断言被标定时的原默认值。
+const SHOCK_MAG = 210;
+
+// 物理测试全部跑在【基准线长 82】上，而不是 config 里的当前值。
+//
+// 为什么：`p50 边长 ∈ [1.2, 1.6] × linkDistance` 这个判据的【原意】是
+// 「弹簧接近静止长度 ⇒ charge 标定得合适」。而它能成立的前提是
+// linkDistance 处于基准量级 —— 一旦把线长调到 40 以下，图谱的整体尺度
+// 被斥力/重力撑着缩不下去（实测 fit-k 几乎不动：0.428 → 0.490），
+// 边长便有下限，比值必然上翘（ld=22 时 1.69，ld=10 时 2.28），
+// 跟 charge 好不好已经没有关系了。
+//
+// 所以 linkDistance 在这里当【外观调参】处理：调它不该让标定测试变红。
+// 要重新标定 charge，用 test/quick-cal.js（它读 configDefaults，也跟着改）。
+const REF_LINK_DISTANCE = 82;
+GFI.config.physics.linkDistance = REF_LINK_DISTANCE;
+
 // ---------------------------------------------------------------------------
 // 断言工具
 // ---------------------------------------------------------------------------
@@ -113,9 +136,9 @@ check('alpha 已降到 alphaMin 附近', sim.alpha <= GFI.config.physics.alphaMi
   `alpha=${sim.alpha.toExponential(2)} (alphaMin=${GFI.config.physics.alphaMin})`);
 
 const st = GFI.Data.stats(D);
-const ratio = st.p50LinkLen / GFI.config.physics.linkDistance;
+const ratio = st.p50LinkLen / REF_LINK_DISTANCE;
 check('p50 边长落在 1.2~1.6 × linkDistance', ratio >= 1.2 && ratio <= 1.6,
-  `p50=${st.p50LinkLen} linkDistance=${GFI.config.physics.linkDistance} 比值=${ratio.toFixed(2)}`);
+  `p50=${st.p50LinkLen} 基准线长=${REF_LINK_DISTANCE} 比值=${ratio.toFixed(2)}`);
 check('图谱不是一团（包围半径合理）', st.boundingRadius > 100, `包围半径=${st.boundingRadius}`);
 check('模拟速度可接受', elapsedMs / N2 < 8, `${(elapsedMs / N2).toFixed(2)} ms/tick（900 tick 共 ${elapsedMs}ms）`);
 
@@ -217,7 +240,7 @@ section('5. 斥力激波 — 必须是"行进波前"而不是"缩放"');
   const firstHit = new Map();
   const mags = new Map();
 
-  fx2.pulse({ ox: 0, oy: 0, sign: 1, viewportWorldHeight: 2000 });
+  fx2.pulse({ ox: 0, oy: 0, sign: 1, magnitude: SHOCK_MAG, viewportWorldHeight: 2000 });
 
   for (let k = 1; k <= 90; k++) {
     const before = new Map();
@@ -261,7 +284,7 @@ section('5. 斥力激波 — 必须是"行进波前"而不是"缩放"');
   const hits = new Map();
   const fx3 = GFI.Effects.create(D2, sim2);
   for (let i = 0; i < D2.n; i++) { D2.vx[i] = 0; D2.vy[i] = 0; }
-  fx3.pulse({ ox: 0, oy: 0, sign: 1, viewportWorldHeight: 2000 });
+  fx3.pulse({ ox: 0, oy: 0, sign: 1, magnitude: SHOCK_MAG, viewportWorldHeight: 2000 });
   for (let k = 0; k < 90; k++) {
     const before = new Float32Array(D2.n);
     for (let i = 0; i < D2.n; i++) before[i] = D2.vx[i];
@@ -276,7 +299,7 @@ section('5. 斥力激波 — 必须是"行进波前"而不是"缩放"');
   // 关键判据 ⑤：倒退时符号翻转 → 内爆
   const fx4 = GFI.Effects.create(D2, sim2);
   for (let i = 0; i < D2.n; i++) { D2.vx[i] = 0; D2.vy[i] = 0; }
-  fx4.pulse({ ox: 0, oy: 0, sign: -1, viewportWorldHeight: 2000 });
+  fx4.pulse({ ox: 0, oy: 0, sign: -1, magnitude: SHOCK_MAG, viewportWorldHeight: 2000 });
   for (let k = 0; k < 30; k++) fx4.update(DT);
   const li = D2.indexById.get('r1-0');
   const radial = D2.x[li] * D2.vx[li] + D2.y[li] * D2.vy[li];   // 与径向同号 = 向外
@@ -521,7 +544,7 @@ section('8b. 激波行程 —— 扫完就结束，不空跑');
 
   const measureLife = (maxRadius) => {
     fx8.clearPulses();
-    fx8.pulse({ ox: 0, oy: 0, sign: 1, maxRadius });
+    fx8.pulse({ ox: 0, oy: 0, sign: 1, magnitude: SHOCK_MAG, maxRadius });
     let ticks = 0;
     while (fx8.pulsesActive() && ticks < 600) { fx8.update(GFI.DT); ticks++; }
     return ticks * GFI.DT;
@@ -538,7 +561,7 @@ section('8b. 激波行程 —— 扫完就结束，不空跑');
 
   // 关键：两道波不该同时存在
   fx8.clearPulses();
-  fx8.pulse({ ox: 0, oy: 0, sign: 1, maxRadius: 2000 });
+  fx8.pulse({ ox: 0, oy: 0, sign: 1, magnitude: SHOCK_MAG, maxRadius: 2000 });
   check('发波后处于活跃', fx8.pulsesActive() === true);
   for (let i = 0; i < Math.ceil(2000 / GFI.config.shock.speed * 60) + 5; i++) fx8.update(GFI.DT);
   check('走完行程后自动结束（不占用脉冲池）', fx8.pulsesActive() === false);
@@ -662,6 +685,153 @@ section('10. 特效空转剪枝 —— 计数器必须精确，隐藏的节点�
   check('cancelHide 前 fadeCount 为 1', fx8.fadeCount === 1, `fadeCount=${fx8.fadeCount}`);
   fx8.cancelHide(q);
   check('cancelHide 后 fadeCount 归零', fx8.fadeCount === 0, `fadeCount=${fx8.fadeCount}`);
+})();
+
+// ===========================================================================
+section('11. 主循环 handoff 门控 —— settle 不许把空闲停机钉死');
+// ===========================================================================
+// 复刻 main.js 子步循环里那两行（改动前 / 改动后）：
+//     const awake = sim.isAwake();
+//     if (awake) sim.tick(DT);
+//     fx.update(DT);
+//     if (awake) fx.applyHandoff(DT);     ← 改动前：模拟睡着时解析解永远不推进
+//     fx.applyHandoff(DT);                ← 改动后
+// main.js 需要 DOM、进不了本沙箱，但被门控的 sim / fx 是这里加载的真实代码，
+// 而失败模式完全由这两行决定：settle 非空 ⇒ fx.anyActive() 恒真 ⇒ main.js 的
+// busy 恒真 ⇒ 空闲停机（连续 30 帧无活动就 cancelAnimationFrame）永不触发。
+(function testHandoffGating() {
+  const buildIso = () => {
+    const nodes = [
+      { id: 'hub', label: 'hub', kind: 'page' },
+      { id: 'a', label: 'a', kind: 'page' },
+      { id: 'b', label: 'b', kind: 'page' },
+      { id: 'iso', label: 'iso', kind: 'page' },   // 零度节点
+    ];
+    const links = [{ source: 'hub', target: 'a' }, { source: 'hub', target: 'b' }];
+    const D = GFI.Data.build(nodes, links, null);
+    const i = D.indexById.get('iso');
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+    for (let k = 0; k < 900; k++) sim.tick(DT);   // 跑到沉降入睡（与 §2 同量级）
+    // 网格最后一次重建时的节点位置 —— 之后 applyHandoff 会绕过模拟写坐标
+    return { D, sim, fx, i, gridX: D.x[i], gridY: D.y[i] };
+  };
+
+  // 复刻 interaction.js 松手：deg===0 ⇒ 刻意不 reheat ⇒ 模拟全程睡着
+  const release = (S, dx, dy) => {
+    const { D, sim, fx, i } = S;
+    const rx = D.x[i] + dx, ry = D.y[i] + dy;
+    sim.pin(i, D.x[i], D.y[i]);
+    sim.unpin(i);
+    D.x[i] = rx; D.y[i] = ry;
+    D.vx[i] = 600 * GFI.DT; D.vy[i] = 400 * GFI.DT;
+    fx.startSettle(i, rx, ry, 600, 400, rx + 30, ry + 20, 0.5);
+  };
+
+  // 返回"第几帧进入空闲"（等价于 main.js 里 idleFrames 开始累加），-1 = 永远忙
+  const runLoop = (S, guardWithAwake, maxFrames) => {
+    const { sim, fx } = S;
+    for (let f = 0; f < maxFrames; f++) {
+      const awake = sim.isAwake();
+      if (awake) sim.tick(DT);
+      fx.update(DT);
+      if (!guardWithAwake || awake) fx.applyHandoff(DT);
+      if (!(sim.isAwake() || fx.anyActive())) return f + 1;
+    }
+    return -1;
+  };
+
+  const MAX = 600;   // 10s，远超 maxSettleTime=1.5s
+
+  // ---- 改动前的门控：必须复现"永久空转" ----
+  const before = buildIso();
+  check('零度节点入睡后 alpha 低于 alphaMin', !before.sim.isAwake(),
+    `alpha=${before.sim.alpha.toExponential(2)}`);
+  release(before, 420, 300);
+  check('零度节点松手不重热（这正是危险路径）', !before.sim.isAwake(),
+    `alpha=${before.sim.alpha.toExponential(2)}`);
+  check('松手后 settle 已激活', before.fx.settleActive === true);
+
+  const stuck = runLoop(before, true, MAX);
+  check('【回归】awake 守卫下 settle 永不结束 → 空闲停机被钉死',
+    stuck === -1, stuck === -1 ? `${MAX} 帧后仍 busy` : `第 ${stuck} 帧就停了`);
+
+  // ---- 改动后的门控：必须在 maxSettleTime 内收敛并放行停机 ----
+  const after = buildIso();
+  release(after, 420, 300);
+  const idleAt = runLoop(after, false, MAX);
+  check('handoff 无条件推进后 settle 自行结束', idleAt > 0,
+    idleAt > 0 ? `第 ${idleAt} 帧（${(idleAt * DT).toFixed(2)}s）进入空闲` : '仍然卡死');
+  check('结束后 settle 已清除', after.fx.settleActive === false);
+  check('结束后 fx.anyActive() 为假 → 可以让循环停机', after.fx.anyActive() === false);
+  check('结束后位置有限', Number.isFinite(after.D.x[after.i]) && Number.isFinite(after.D.y[after.i]));
+
+  // ---- 网格刷新：睡着时 handoff 直接写坐标，网格必须跟上 ----
+  // 不补 rebuildGrid 的话，被甩出的节点仍以【入睡时的网格位置】参与剔除，
+  // 而剔除 / 命中测试都复用这张网格（renderer.cull / interaction.hitTest）——
+  // 表现就是飞行中途凭空消失、并且点不中。
+  const { D: D11, sim: sim11, i: i11 } = after;
+  const buf = new Int32Array(64);
+  const findSelf = () => {
+    const c = sim11.grid.collectRadius(D11, D11.x[i11], D11.y[i11], 4, buf, D11.visible);
+    for (let p = 0; p < c; p++) if (buf[p] === i11) return true;
+    return false;
+  };
+  const cellOf = (v, min) => Math.floor((v - min) * sim11.grid.inv);
+  const cellsMoved = Math.abs(cellOf(D11.x[i11], sim11.grid.minX) - cellOf(after.gridX, sim11.grid.minX))
+    + Math.abs(cellOf(D11.y[i11], sim11.grid.minY) - cellOf(after.gridY, sim11.grid.minY));
+  check('位移跨越了网格单元（陈旧网格必然漏掉它）', cellsMoved >= 1, `跨 ${cellsMoved} 格`);
+  check('陈旧网格里查不到 → 会被剔除掉', !findSelf(),
+    `最终位置 ${D11.x[i11].toFixed(0)},${D11.y[i11].toFixed(0)}`);
+  sim11.rebuildGrid();
+  check('rebuildGrid 之后能查到 → 剔除 / 命中测试恢复', findSelf() === true);
+})();
+
+// ===========================================================================
+section('12. 拖拽手感的前提 —— reheat 必须瞬时，alphaTarget 必须渐进');
+// ===========================================================================
+// interaction.js 在 pointerdown 里【两个都要调】：
+//   sim.reheat(dragStart)        → 立刻给足动能（手感的关键）
+//   sim.setAlphaTarget(dragStart)→ 你【握着】的这段时间里维持活性
+// 只调后者的话，alpha 要从 alphaMin 按 alphaDecay 指数爬升；而 alphaDecay 是
+// 按 settleTicks=400 标定的 → 时间常数约 1 秒。抓起 hub 后邻域要一秒才活过来。
+//
+// 这条守的是【那个前提】本身（reheat 瞬时 / setAlphaTarget 渐进）。
+// ⚠ 它守不住"interaction.js 里那一行有没有写" —— interaction 需要 DOM，
+//   不在本沙箱的加载范围内。那条只能靠 Logseq 里实测。
+(function testReheatSemantics() {
+  const demo = GFI.DataSource.demo(120, { seed: 5 });
+  const D = GFI.Data.build(demo.nodes, demo.links, null);
+  const sim = GFI.Physics.create(D, GFI.config.physics);
+  const T = GFI.config.reheat.dragStart;
+
+  for (let k = 0; k < 900; k++) sim.tick(DT);   // 沉降入睡
+  check('基线：模拟已入睡', !sim.isAwake(), `alpha=${sim.alpha.toExponential(2)}`);
+
+  // ---- reheat：瞬时生效，不经过任何 tick ----
+  sim.reheat(T);
+  check('reheat 立即把 alpha 抬到目标值', Math.abs(sim.alpha - T) < 1e-9,
+    `alpha=${sim.alpha}（目标 ${T}）`);
+
+  // ---- setAlphaTarget：渐进 ----
+  sim.setAlphaTarget(0);
+  for (let k = 0; k < 600; k++) sim.tick(DT);   // 重新衰减入睡
+  check('复位后再次入睡', !sim.isAwake(), `alpha=${sim.alpha.toExponential(2)}`);
+
+  sim.setAlphaTarget(T);
+  sim.tick(DT);
+  check('setAlphaTarget 一个 tick 内几乎没动（所以不能单独用来"抓起就活"）',
+    sim.alpha < T * 0.05, `1 tick 后 alpha=${sim.alpha.toExponential(2)}（目标 ${T}）`);
+
+  let halfAt = -1;
+  for (let k = 2; k <= 900; k++) {
+    sim.tick(DT);
+    if (halfAt < 0 && sim.alpha >= T * 0.5) halfAt = k;
+  }
+  const decay = 1 - Math.pow(GFI.config.physics.alphaMin, 1 / GFI.config.physics.settleTicks);
+  const theory = Math.log(2) / decay;
+  check('爬到目标一半要几十个 tick —— 这就是"拽不动"的来源',
+    halfAt > 30, `第 ${halfAt} 个 tick（${(halfAt * DT * 1000).toFixed(0)}ms），理论 ${theory.toFixed(0)} tick`);
 })();
 
 // ===========================================================================

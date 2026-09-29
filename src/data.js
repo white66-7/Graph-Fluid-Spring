@@ -237,7 +237,10 @@
       const d = D.deg[i];
       const sd = Math.sqrt(d);
 
-      D.radius[i] = clamp(rcfg.radiusBase + rcfg.radiusScale * sd, rcfg.radiusMin, rcfg.radiusMax);
+      // nodeSize 乘在【clamp 之后】—— 乘在里面的话 radiusMin/radiusMax 会把
+      // 倍率吃掉（缩小时永远被抬回 min，放大时永远被压回 max）。
+      D.radius[i] = clamp(rcfg.radiusBase + rcfg.radiusScale * sd, rcfg.radiusMin, rcfg.radiusMax)
+        * rcfg.nodeSize;
 
       // 斥力随度数增长 —— 最"Obsidian"的一个参数：hubs 撑开空地，叶子保持紧密
       const gain = 1 + cfg.chargeDegGain * sd;

@@ -1,6 +1,4 @@
 /*
- * Graph Fluid Inertia — Logseq 生命周期胶水
- * ===========================================================================
  * 这个文件只做三件事：
  *   1. 注册设置面板 + 同步设置
  *   2. 监听 #global-graph 的【出现与消失】，挂载 / 拆卸渲染器
@@ -28,6 +26,10 @@
   let observer = null;
   let scanTimer = null;
   let booting = false;
+  // 上一次拉到的原始数据（节点/边，未经 Data.build）。
+  // 改「斥力 / 连接线长度 / 节点大小」这类【在 Data.build 里烘死】的参数时，
+  // 用它就地重建管线即可，不必再查一次库。见 GFI.rebuild()。
+  let lastRaw = null;
 
   // -------------------------------------------------------------------------
   // 检测图谱视图
@@ -45,10 +47,15 @@
     booting = true;
     try {
       const cfg = GFI.config;
-      // 先用空数据挂载 —— 立刻给出视觉反馈，数据到了再 setData
+      // 先用空数据挂载，数据到了再 setData。
+      // ⚠ deferTakeover：空数据期间【不要】把原生图谱藏掉 —— 否则从"原生消失"
+      //   到"我们画出第一帧"之间有一段空画布，长度等于下面那次 fetchData 的耗时。
+      //   冷启动第一次查库最慢，所以那个空白只有【首次】进入图谱时看得见，
+      //   表现就是"闪一下"。交给 main.js 在画完第一帧有内容的画面后【同帧】交接。
       graphApi = GFI.Main.boot({
         nodes: [],
         links: [],
+        deferTakeover: true,
         onNodeActivate: activateNode,
       });
       if (!graphApi) { booting = false; return; }
@@ -61,6 +68,7 @@
       });
       if (!graphApi) { booting = false; return; }   // 期间被拆掉了
       console.log(`[GFI] 数据就绪 ${Math.round(performance.now() - t0)}ms`);
+      lastRaw = data;
       graphApi.setData(data.nodes, data.links);
     } catch (e) {
       console.error('[GFI] 挂载失败', e);
@@ -78,8 +86,18 @@
       demoCount: GFI.config.demoCount,
       includeParentLinks: false,
     });
+    lastRaw = data;
     if (graphApi) graphApi.setData(data.nodes, data.links);
     return data;
+  };
+
+  // 用上一次的原始数据就地重建管线 —— 不用查库，而且【位置按 id 继承】，
+  // 所以改外观参数不会让图谱跳回随机位置。
+  // 这是「调参数」的正确入口：改完设置调它，立刻看到效果。
+  GFI.rebuild = function rebuild() {
+    if (!graphApi || !lastRaw) return null;
+    graphApi.setData(lastRaw.nodes, lastRaw.links);
+    return lastRaw;
   };
 
   function unmountGraph() {
@@ -87,6 +105,7 @@
       graphApi.destroy('graph view closed');
       graphApi = null;
     }
+    lastRaw = null;
   }
 
   // -------------------------------------------------------------------------
@@ -177,6 +196,21 @@
     GFI.syncSettings(s || {});
   }
 
+  // 「斥力 / 连接线长度 / 节点大小」这三个值是在 Data.build 里【烘进】定型数组的
+  // （D.charge / D.ldist / D.radius），改完 GFI.config 对已经建好的图毫无影响，
+  // 必须重建管线才生效。这里用一个签名来检测它们有没有变。
+  function layoutSignature() {
+    const c = GFI.config;
+    return c.physics.charge + '|' + c.physics.linkDistance + '|' + c.render.nodeSize;
+  }
+
+  // 过滤规则不同：它们是在【数据源】那一步生效的，重建不够，得重新查一次库。
+  // 不自动做 —— hideNames 是个文本框，边打字边查库不合适。
+  function filterSignature() {
+    const d = GFI.config.data;
+    return [d.hideSystemJournal, d.hideSystemPages, d.hideNames.join(',')].join('|');
+  }
+
   // config.js 通过这个回调把「配置已升级」写回 Logseq 设置，
   // 这样下次启动就不会重复重置（也避免 config.js 直接依赖 logseq API）
   GFI.onFreshSettings = function onFreshSettings(values) {
@@ -205,7 +239,7 @@
         unmountGraph();
         // 插件真的要走了才摘 Pixi 钩子。
         // ⚠ 不能挪进 unmountGraph()：图谱视图来来去去都会走那条路径，
-        //   而摘掉钩子会整整漏掉下一个 Application（详见 overlay.js 的说明）。
+        //   而摘掉钩子会整整漏掉下一个 Application
         try { GFI.Overlay.releasePixiCapture(); } catch (e) {}
       });
     }
@@ -216,10 +250,19 @@
         applySettings(logseq.settings);
         logseq.onSettingsChanged((s) => {
           const wasNative = GFI.getGraph() && GFI.getGraph().nativeMode;
+          const beforeLayout = layoutSignature();
+          const beforeFilter = filterSignature();
           applySettings(s);
           const g = GFI.getGraph();
           if (g && !!GFI.config.useNativeGraph !== !!wasNative) {
             g.setNativeMode(!!GFI.config.useNativeGraph);
+          }
+          // ⚠ 没有这一步的话，在设置面板里拖「斥力 / 连接线长度 / 节点大小」
+          //   是【毫无反应】的 —— 它们被烘死在定型数组里。很容易因此得出
+          //   "这个旋钮根本没用"的结论，而实际上是改了没重建。
+          if (g && layoutSignature() !== beforeLayout) GFI.rebuild();
+          if (g && filterSignature() !== beforeFilter) {
+            console.log('[GFI] 过滤规则已变 —— 运行 __GFI__.reload() 重新拉取数据后生效');
           }
         });
       } catch (e) {

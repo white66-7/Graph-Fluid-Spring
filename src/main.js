@@ -70,8 +70,25 @@
     let lodForced = -1;
     let lastStats = null;
 
+    // ---- 延迟交接（见 boot 末尾 / setData / frame 三处）----
+    // 为什么需要：boot() 是在【数据还没到】的时候挂载的。老做法是挂上就立刻
+    // setNativeVisible(false) —— 原生图谱消失，而我们的画布是空的，于是有一段
+    // 「空白」一直持续到 fetchData 返回。冷启动第一次查库最慢，所以这段空白
+    // 只有【首次】进入图谱时看得见，表现就是"闪一下"。
+    // 现在：数据没到之前原生继续显示，我们的循环照跑（容器 display:none，
+    // 但往 canvas 上画是照样有效的），等 setData 之后画出第一帧有内容的画面，
+    // 再在【同一帧】里交接 —— 用户看不到任何中间态。
+    const deferTakeover = !!opts.deferTakeover && !nativeMode;
+    let tookOver = !deferTakeover;
+    let takeoverArmed = false;
+
+    // 视野缓动状态（实现见 fitView 下方的 animateFitTo / stepCamAnim）。
+    // ⚠ 声明必须放在这里、而不是和那几个函数挨着：attachInteraction() 在我们
+    //   定义它们【之前】就跑了，而那些 hook 闭包会引用这个变量 —— 放后面虽然
+    //   靠"调用时机晚于声明"侥幸能work，但一次重排就会变成 TDZ 报错。
+    let camAnim = null;
+
     // 数据加载后自动重新适配一次视野。
-    //
     // 为什么必需：setData 里的 fitView 是在【种子布局】上算的 —— 那时节点还挤在
     // 半径 ~240 的螺旋里。模拟跑完后图谱可能扩散到几千单位，而相机不会自己跟上，
     // 结果就是视野里只剩一两个节点，看起来像白屏。
@@ -88,6 +105,10 @@
     const ftScratch = new Float32Array(lodCfg.sampleFrames);
     let ftIdx = 0, ftFilled = 0, goodFrames = 0;
 
+    // ⚠ 不变式：有效样本位于 frameTimes[0 .. ftFilled-1]。
+    //   所以换档时重置 ftFilled 必须【同时】重置 ftIdx —— 否则新一轮样本从旧位置
+    //   绕圈写入，而中位数仍然在读 [0..ftFilled-1]，正好在换档后最需要准数的
+    //   那 30 帧里混进换档【之前】的陈旧样本。
     function pushFrameTime(ms) {
       frameTimes[ftIdx] = ms;
       ftIdx = (ftIdx + 1) % frameTimes.length;
@@ -109,23 +130,30 @@
     }
 
     function updateLod() {
-      if (lodForced >= 0) { lodLevel = lodForced; return; }
-      if (!lodCfg.auto || ftFilled < lodCfg.sampleFrames) return;
-      const p50 = medianFrameTime();
       const maxLevel = lodCfg.levels.length - 1;
-      if (p50 > lodCfg.downshiftMs && lodLevel < maxLevel) {
-        lodLevel++; goodFrames = 0; ftFilled = 0;
-      } else if (p50 < lodCfg.upshiftMs) {
-        // 非对称阈值 + 持续帧数，防止在档位之间反复横跳
-        if (++goodFrames >= lodCfg.upshiftHoldFrames && lodLevel > 0) {
-          lodLevel--; goodFrames = 0; ftFilled = 0;
+
+      if (lodForced >= 0) {
+        lodLevel = clamp(lodForced, 0, maxLevel) | 0;
+      } else if (lodCfg.auto && ftFilled >= lodCfg.sampleFrames) {
+        const p50 = medianFrameTime();
+        if (p50 > lodCfg.downshiftMs && lodLevel < maxLevel) {
+          lodLevel++; goodFrames = 0; ftFilled = 0; ftIdx = 0;
+        } else if (p50 < lodCfg.upshiftMs) {
+          // 非对称阈值 + 持续帧数，防止在档位之间反复横跳
+          if (++goodFrames >= lodCfg.upshiftHoldFrames && lodLevel > 0) {
+            lodLevel--; goodFrames = 0; ftFilled = 0; ftIdx = 0;
+          }
+        } else {
+          goodFrames = 0;
         }
-      } else {
-        goodFrames = 0;
       }
+
+      // ⚠ 这两行必须留在【所有早退路径之外】。
+      //   原先它们排在两个 early return 后面，于是「手动锁档」(__GFI__.setLod)
+      //   以及「采样窗口还没填满的头 30 帧」，sim.lod 都停在初始值 ——
+      //   降档那套「隔 tick 跑斥力 / 跳过碰撞 / 跳过孤立节点斥力」全部不生效，
+      //   锁档等于按了没反应的按钮。
       if (P.fx && P.fx.setPulsesEnabled) P.fx.setPulsesEnabled(lodCfg.levels[lodLevel].pulses);
-      // 必须把 LOD 传进物理 —— 否则 sim.lod 永远停在初始值，
-      // 降档后「隔 tick 跑斥力」「跳过碰撞」这些优化根本不会生效
       P.sim.lod = lodLevel;
     }
 
@@ -156,7 +184,7 @@
         P.timeline.setKindOn(idx, !P.timeline.isKindOn(idx));
         syncToolbar();
       },
-      onFit() { fitView(); },
+      onFit() { fitViewAnimated(); },
     });
 
     function syncToolbar() {
@@ -186,9 +214,11 @@
         },
         onHoverChange() { markDirty(); },
         onSelectionChange(i) { emitter.emit('selectionchange', i); markDirty(); },
-        // 相机变化（平移/缩放）→ 只需重绘，不需要模拟
-        onCameraChange() { markDirty(); },
-        onWake() { markDirty(); },
+        // 相机变化（平移/缩放）→ 只需重绘，不需要模拟。
+        // 同时放弃进行中的视野缓动 —— 用户一动手就不跟他抢镜头。
+        onCameraChange() { cancelCamAnim(); markDirty(); },
+        // 任何指针动作也放弃缓动（拖节点不改相机，但用户显然已经接管了）
+        onWake() { cancelCamAnim(); markDirty(); },
       });
       syncHighlightAfterVisibility();
       markDirty();
@@ -227,11 +257,58 @@
       markDirty();
     }
 
+    // ---- 视野缓动 ----
+    // 为什么需要：setData 时的 fitView 是在【种子布局】上算的，模拟沉降完图谱
+    // 会大一圈（实测包围盒差 40%+），所以这里要再适配一次。瞬变会让整个画面
+    // "啪"地跳一下 —— 缓动就没这个问题。
+    //
+    // ⚠ 刻意【不放进 camera.js】：那个模块有一条结构性约束 —— 不暴露任何动画
+    //   方法，好让"激波"和"缩放"在 API 层面不可能被混淆（激波必须往模拟里注入
+    //   速度，绝不能靠改相机伪装）。相机动画一旦进了那个模块，这条约束就破了。
+    function animateFitTo(b, ms) {
+      const pad = cfg.camera.fitPadding;
+      const w = Math.max(1, b.maxX - b.minX), h = Math.max(1, b.maxY - b.minY);
+      const kx = (cam.W - 2 * pad) / w, ky = (cam.H - 2 * pad) / h;
+      const k1 = clamp(Math.min(kx, ky), cfg.camera.minZoom, cfg.camera.maxZoom);
+      const x1 = (b.minX + b.maxX) * 0.5, y1 = (b.minY + b.maxY) * 0.5;
+      if (!(ms > 0) || (cam.k === k1 && cam.x === x1 && cam.y === y1)) {
+        fitView();
+        return;
+      }
+      camAnim = { t: 0, dur: ms / 1000, x0: cam.x, y0: cam.y, k0: cam.k, x1, y1, k1 };
+      wake();
+    }
+
+    function fitViewAnimated() {
+      animateFitTo(GFI.Data.bounds(P.D, true), cfg.camera.fitAnimMs);
+    }
+
+    function stepCamAnim(dt) {
+      const a = camAnim;
+      if (!a) return;
+      a.t += dt;
+      let p = a.t / a.dur;
+      if (!(p < 1)) p = 1;
+      const e = 1 - Math.pow(1 - p, 3);                 // ease-out cubic
+      cam.x = a.x0 + (a.x1 - a.x0) * e;
+      cam.y = a.y0 + (a.y1 - a.y0) * e;
+      // 缩放走【几何插值】。线性插值 k 会让前段显得飞快、后段几乎不动 ——
+      // 人对缩放的感知是对数的（同 zoomByWheel 用 zoomBase 指数一样）。
+      cam.k = a.k0 * Math.pow(Math.max(1e-9, a.k1) / Math.max(1e-9, a.k0), e);
+      if (p >= 1) { camAnim = null; fitK = cam.k; }
+      markDirty();                                       // 保持循环活着（busy 含 dirty）
+    }
+
+    /** 用户一动相机就放弃缓动 —— 不跟人抢镜头 */
+    function cancelCamAnim() { camAnim = null; }
+
     function setNativeMode(native) {
       nativeMode = !!native;
       overlay.setNativeVisible(nativeMode);
       if (nativeMode) stopLoop();
       else { dirty = true; startLoop(); }
+      // 手动接管即视为交接完成，别再让 frame() 去重复交接一次
+      if (!nativeMode) { tookOver = true; takeoverArmed = false; }
       syncToolbar();
       emitter.emit('nativemode', nativeMode);
     }
@@ -285,13 +362,28 @@
           const awake = P.sim.isAwake();
           if (awake) P.sim.tick(DT);
           P.fx.update(DT);
-          if (awake) P.fx.applyHandoff(DT);
+          // ⚠ handoff 必须【在模拟睡着时也跑】。
+          //   它是解析解 + 直接写 D.x/D.y，不需要模拟推进。而 settle 非空会让
+          //   fx.anyActive() 恒真 —— 一旦这里被 awake 挡住，settle 就永远结束不了，
+          //   下面第 7 步的 busy 判定就永远为真，空闲停机（本文件开头第 2 条铁律）
+          //   彻底失效，循环会以 60fps 永久空转。
+          //   最容易撞上的路径：甩掷【零度节点】—— 那条路径刻意不 reheat
+          //   （见 interaction.js 松手处），所以模拟全程都是睡着的。
+          P.fx.applyHandoff(DT);
           if (P.timeline) P.timeline.update(DT, vhWorld);
           acc -= DT;
           substeps++;
         }
         // 丢弃积压，防止死亡螺旋
         if (substeps >= maxSub) acc = 0;
+
+        // 模拟睡着时 chargeGrid 不会自己重建，而 handoff 正在写坐标。
+        // 剔除与命中测试都复用这张网格，不补这一下的话，被甩出的节点会以
+        // 【旧网格位置】参与剔除 —— 飞出余量后就地消失、也点不中。
+        if (!P.sim.isAwake() && P.fx.settleActive) P.sim.rebuildGrid();
+
+        // ---- 视野缓动（每帧一次，不是每 substep —— 它是时间驱动的）----
+        stepCamAnim(elapsed / 1000);
 
         // ---- 沉降后自动适配视野（见 autoFitPending 的说明）----
         if (autoFitPending && !P.sim.isAwake() && !(P.inter && P.inter.interacted)) {
@@ -301,7 +393,9 @@
           const curW = cam.W / cam.k, curH = cam.H / cam.k;
           const wantW = Math.max(1, b.maxX - b.minX), wantH = Math.max(1, b.maxY - b.minY);
           if (Math.abs(curW - wantW) / wantW > 0.25 || Math.abs(curH - wantH) / wantH > 0.25) {
-            fitView();
+            // 缓动而不是瞬变 —— 种子布局到沉降完的图谱包围盒差 40%+，
+            // 瞬变就是整个画面"啪"地跳一下
+            animateFitTo(b, cfg.camera.fitAnimMs);
           }
         }
 
@@ -321,8 +415,23 @@
           labelsOn,
         });
         lastStats = stats;
-        // LOD 看的是【整帧处理耗时】，不只是绘制耗时 —— 物理占大头时也得降档
-        pushFrameTime(GFI.util.now() - now);
+
+        // ---- 交接：画完这一帧（画布上已经有内容了）再把原生图谱藏掉 ----
+        // 必须是【同一帧内】完成，中间不能插一次 rAF，否则会出现
+        // 「原生已藏 / 我们还没画」的那一帧空白 —— 也就是要修的那个"闪"。
+        if (takeoverArmed) {
+          takeoverArmed = false;
+          tookOver = true;
+          overlay.setNativeVisible(false);
+          markDirty();
+        }
+
+        // LOD 采样必须用【真实帧间隔 elapsed】，不能用 GFI.util.now() - now。
+        //   后者只量到主线程 JS 跑完为止，而 glow 的 drawImage 是纯 fill-rate 开销，
+        //   光栅化在 raster / compositor 线程上 —— 主线程早在 GPU 出图之前就返回了。
+        //   也就是说：最贵的那一环，主线程计时【看不见】。
+        //   elapsed 还顺带覆盖了同帧内其他 rAF 回调（含宿主自己的）占用的时间。
+        pushFrameTime(elapsed);
         updateLod();
 
         // ---- 空闲判定 ----
@@ -405,6 +514,8 @@
         autoFitPending = true;        // 等沉降完再精确适配一次
         P.sim.reheat(cfg.reheat.dataChange);
         startLoop();
+        // 数据已就位，安排交接：下一帧画完（那时画布上已经有东西了）再换过来
+        if (!tookOver) takeoverArmed = true;
       },
 
       setCutoff(ms) {
@@ -423,6 +534,8 @@
       },
 
       fitView,
+      /** 带缓动的适配视野（工具栏那个按钮用的就是它） */
+      fitViewAnimated,
 
       /**
        * 实时调整外观（不用重载插件）。
@@ -431,12 +544,16 @@
        */
       setRender(partial) {
         if (!partial) return cfg.render;
+        // nodeSize 是在 Data.build 里烘进 D.radius 的 —— 光改配置不生效，
+        // 必须重建管线。顺手代劳，省得调参时还要记得手动 rebuild。
+        const needRebuild = partial.nodeSize !== undefined;
         for (const k in partial) {
           if (k === 'palette') Object.assign(cfg.render.palette, partial.palette);
           else cfg.render[k] = partial[k];
         }
         if (renderer && renderer.invalidateSprites) renderer.invalidateSprites();
         markDirty();
+        if (needRebuild && GFI.rebuild) GFI.rebuild();
         return {
           edgeColor: cfg.render.edgeColor,
           edgeColorHi: cfg.render.edgeColorHi,
@@ -482,6 +599,13 @@
     if (nativeMode) {
       overlay.setNativeVisible(true);
       syncToolbar();
+    } else if (deferTakeover) {
+      // 数据还没到：先让原生图谱继续显示着，我们这边照常 fitView + 跑循环
+      // （容器是 display:none，但往 canvas 上绘制照样有效，只是不参与合成）。
+      // 等 setData 之后画出第一帧有内容的画面，再由 frame() 交接。
+      overlay.setNativeVisible(true);
+      fitView();
+      startLoop();
     } else {
       overlay.setNativeVisible(false);
       fitView();
@@ -511,6 +635,10 @@
       const natToolbar = overlay.nativeToolbar;
       const out = {
         循环: { 运行中: rafId != null, 帧计数: frameCount, 原生模式: nativeMode, LOD: lodLevel },
+        // 延迟交接状态。首次进图谱时的"闪一下"就是这里没交接好：
+        // 期望看到 延迟交接=true、已交接=true、待交接=false（等数据的那段时间
+        // 已交接=false 是正常的，那时原生图谱还显示着）。
+        交接: { 延迟交接: deferTakeover, 已交接: tookOver, 待交接: takeoverArmed },
         尺寸: { cssW, cssH, dpr: renderer.dpr, canvasAttr: overlay.canvas.width + '×' + overlay.canvas.height },
         相机: { x: Math.round(cam.x), y: Math.round(cam.y), k: +cam.k.toFixed(4) },
         数据: { n: P.D.n, m: P.D.m, 可见: (() => { let c = 0; for (let i = 0; i < P.D.n; i++) if (P.D.visible[i]) c++; return c; })() },
@@ -753,6 +881,8 @@
         pause: () => P.timeline && P.timeline.setPlaying(false),
         /** 改过滤规则后重新拉数据，不用重载插件 */
         reload: () => (GFI.reloadData ? GFI.reloadData() : null),
+        /** 改完布局参数（斥力 / 线长 / 节点大小）后就地重建 —— 不查库，位置按 id 继承 */
+        rebuild: () => (GFI.rebuild ? GFI.rebuild() : null),
         /** 直接改内置类黑名单并重新加载，如 __GFI__.hideClasses(['logseq.class/Tag','logseq.class/Page']) */
         hideClasses: (idents) => {
           GFI.config.data.hideClassIdents = idents || [];

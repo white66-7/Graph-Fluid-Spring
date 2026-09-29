@@ -100,7 +100,9 @@
       const wx = cam.screenToWorldX(sx);
       const wy = cam.screenToWorldY(sy);
       const tol = 4 / cam.k;                 // 4 屏幕像素的容差，换成世界单位
-      const maxR = GFI.config.render.radiusMax / Math.max(0.01, cam.k) + tol;
+      // 必须带上 nodeSize —— 否则节点放大后，边上那圈点不中
+      const rcfg = GFI.config.render;
+      const maxR = rcfg.radiusMax * rcfg.nodeSize / Math.max(0.01, cam.k) + tol;
 
       const cnt = sim.grid.collectRadius(D, wx, wy, maxR, hitBuf, D.visible);
       if (!cnt) return -1;
@@ -202,6 +204,14 @@
         //   而孤立节点根本没有邻居，没有理由牵动别人。
         //   之前无条件抬高，拖动一个空节点会让整张图一起抖。
         sim.pin(hit, D.x[hit], D.y[hit]);
+        // 抬高 alpha 目标：让你【握着】的这段时间里邻域一直是活的
+        // （否则 alpha 会在 ~1s 内自己衰减掉，握着也不动）。
+        //
+        //  这里【只】设目标，绝不能顺手 reheat —— 因为此刻还分不清"点一下"和
+        //   "抓起来拖"。reheat 是瞬时的，放在这儿的话，一次普通点击（pin 完立刻
+        //   unpin）也会把整张图重热到 dragStart：力全部按 0.3 重新作用约 1.7 秒，
+        //   图谱会先抖 / 重排一下再跳转 —— 看起来就是"点一下会跳"。
+        //   重热推迟到 onPointerMove 里首次越过 minDragDist 的那一刻。
         if (D.deg[hit] > 0) sim.setAlphaTarget(cfg.reheat.dragStart);
         state.dragNode = hit;
         trailReset(sx, sy, state.downT);
@@ -257,7 +267,17 @@
         const nx = wx - state.offX;
         const ny = wy - state.offY;
 
-        if (Math.hypot(sx - state.downX, sy - state.downY) >= cfg.drag.minDragDist) state.moved = true;
+        if (!state.moved && Math.hypot(sx - state.downX, sy - state.downY) >= cfg.drag.minDragDist) {
+          state.moved = true;
+          // ⚠ 重热发生在【拖拽真正开始】的这一刻，而不是 pointerdown。
+          //   reheat 是"alpha 下限，取 max"，瞬时生效 —— 这是手感的关键
+          //   （只靠 setAlphaTarget 的话，alpha 按 alphaDecay 指数爬升，
+          //     实测到目标一半要 41 个 tick ≈ 683ms，抓起 hub 后邻域一秒才活）。
+          //   但正因为它是瞬时的，就只能在"确定是拖拽"之后调：放在 pointerdown
+          //   会让普通点击也重热整张图，图谱先抖一下再跳转。
+          //   0.0 的悬停不算 —— 只有真的动了 minDragDist 才重热。
+          if (D.deg[state.dragNode] > 0) sim.reheat(cfg.reheat.dragStart);
+        }
 
         sim.pin(state.dragNode, nx, ny);
         wake();
@@ -393,7 +413,7 @@
       state.interacted = true;
       const [sx, sy] = localPoint(e);
       const changed = cam.zoomByWheel(sx, sy, e.deltaY);
-      // ⚠ 缩放也不唤醒模拟（否则滚一下就要重跑一遍布局）。
+      //  缩放也不唤醒模拟（否则滚一下就要重跑一遍布局）。
       //   但必须重绘 —— 相机变了但画面没变就是"滚轮没反应"。
       if (changed && hooks.onCameraChange) hooks.onCameraChange();
     }

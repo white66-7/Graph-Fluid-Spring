@@ -46,8 +46,27 @@
     // 没有任何东西移动过，所以那张旧网格恰好是精确的，平移缩放零成本。
     let cullGrid = null;
 
-    // 标签测量缓存 —— measureText 单次 5~20µs，220 个标签不缓存就是整个标签预算
-    const measureCache = new Map();
+    // 标签精灵缓存 —— key = 最终显示的字符串（已按 labelMaxChars 截断）。
+    // 标签在屏幕空间的字体 / 颜色 / 字号是恒定的（不随相机 k 变化），所以每个
+    // unique 字符串只需光栅化一次，之后每帧一次 drawImage 取代 strokeText +
+    // fillText（后者每帧都要把每个字形轮廓重新描一遍边）。
+    // 240 个标签 × ~15 字符 ≈ 7200 次字形描边/填充 → 240 次 blit。
+    // 条目同时带着宽度，所以顺带取代了原先那个【从未被调用过的】measureText 缓存。
+    const labelCache = new Map();
+    let labelFrame = 0;
+    let labelDrawn = 0;
+
+    // 标签精灵的尺寸基准。
+    // pad 用于容纳 halo 描边的外溢；高度取【行高】而不是逐字符串的实际字形高 ——
+    // 否则 "abc" 与 "Äg" 会得到不同的精灵高度，画出来基线互相错位。
+    let labelPad = 4, labelBoxH = 24;
+    function refreshLabelMetrics() {
+      const m = /(\d+(?:\.\d+)?)px/.exec(rcfg.labelFont);
+      const size = m ? parseFloat(m[1]) : 12;
+      labelPad = Math.ceil(rcfg.labelHaloWidth) + 2;
+      labelBoxH = Math.ceil(size * 1.3) + labelPad * 2;
+    }
+    refreshLabelMetrics();
 
     // 标签占位网格（抑制密集处互相糊）
     let occW = 0, occH = 0;
@@ -153,7 +172,81 @@
       return s;
     }
 
-    function invalidateSprites() { spriteCache.clear(); }
+    // -----------------------------------------------------------------------
+    // 标签精灵
+    // -----------------------------------------------------------------------
+    function makeLabelSprite(text) {
+      // 必须先量宽度再建画布 —— 尺寸要按内容裁，不然 240 个标签就是 240 张
+      // 全宽的图，内存全浪费。量之前显式设一次 font，不依赖外面设过。
+      ctx.font = rcfg.labelFont;
+      const wCss = Math.ceil(ctx.measureText(text).width) + labelPad * 2;
+      const hCss = labelBoxH;
+
+      // ⚠ 设备像素必须取【整】，且对外暴露的 CSS 尺寸要由它【除回来】。
+      //   若按 w*dpr 取浮点再 ceil，drawImage 的目标尺寸（w × dpr）就与源尺寸
+      //   差最多 1px —— 于是每次 blit 都触发一次双线性重采样，文字发虚。
+      //   除回来之后 dw*dpr === canvas.width，是严格 1:1。
+      const devW = Math.max(1, Math.round(wCss * dpr));
+      const devH = Math.max(1, Math.round(hCss * dpr));
+
+      const c = topDoc.createElement('canvas');
+      c.width = devW; c.height = devH;
+      const g = c.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.font = rcfg.labelFont;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.lineJoin = 'round';
+      g.miterLimit = 2;
+
+      const cx = devW / dpr * 0.5, cy = devH / dpr * 0.5;
+      // 先描边再加字 —— 深色光晕把文字从辉光背景里"抠"出来（与主 ctx 同一套参数）
+      if (rcfg.labelHaloWidth > 0) {
+        g.strokeStyle = rcfg.labelHaloColor;
+        g.lineWidth = rcfg.labelHaloWidth;
+        g.strokeText(text, cx, cy);
+      }
+      g.fillStyle = rcfg.labelColor;
+      g.fillText(text, cx, cy);
+
+      return { canvas: c, w: devW / dpr, h: devH / dpr };
+    }
+
+    // 条目带 lastFrame，超限时按"最近没用过"清扫。
+    // 不用 LRU 的 delete+set：那种写法每帧每标签两次 Map 写，比偶尔清扫一趟更贵。
+    function getLabelSprite(text) {
+      let e = labelCache.get(text);
+      if (e) { e.lastFrame = labelFrame; return e; }
+
+      e = makeLabelSprite(text);
+      e.lastFrame = labelFrame;
+      labelCache.set(text, e);
+
+      const max = rcfg.labelCacheMax;
+      if (labelCache.size > max) {
+        const keepAfter = labelFrame - 2;
+        for (const [k, v] of labelCache) if (v.lastFrame < keepAfter) labelCache.delete(k);
+        // 清完仍超限（单帧就要画比上限还多的不同标签，即 labelCacheMax 配小了）→
+        // 从最旧的开始丢到限额内。【不能整体 clear()】：那会把本帧刚建的一起丢掉，
+        // 下一帧全部重建，于是每帧都在建精灵 —— 比不缓存还慢。
+        // Map 保持插入顺序，所以 keys() 从前往后就是由旧到新。
+        if (labelCache.size > max) {
+          const it = labelCache.keys();
+          while (labelCache.size > max) {
+            const k = it.next();
+            if (k.done) break;
+            labelCache.delete(k.value);
+          }
+        }
+      }
+      return e;
+    }
+
+    function invalidateSprites() {
+      spriteCache.clear();
+      labelCache.clear();
+      refreshLabelMetrics();     // labelFont / haloWidth / dpr 都可能变了
+    }
 
     // -----------------------------------------------------------------------
     // 剔除
@@ -203,8 +296,11 @@
 
       if (!D.n) return { cull: 0, total: GFI.util.now() - t0 };
 
-      const maxR = rcfg.radiusMax;
-      cull(maxR + 16);
+      // 剔除余量要容得下【辉光】，而不是只容下节点本体：辉光以节点为中心向外
+      // 摊开 spread × rScreen（见 drawGlow 的 half），而 pop 期间 scaleMul 还能到
+      // 1 + pop.amp。只留 radiusMax + 16 的话，贴着视口边缘的节点会在边缘上
+      // "啪"地亮起来 —— 因为画布每帧清屏，边缘外的辉光就是没画。
+      cull(rcfg.radiusMax * rcfg.nodeSize * (1 + GFI.config.pop.amp) * rcfg.glowSpread + 16);
       const tCull = GFI.util.now();
 
       const hoverIdx = view.hoverIdx | 0;
@@ -223,6 +319,7 @@
       drawCores(nodeList, nodeCount, k, lodCfg, hoverIdx);
       const tCore = GFI.util.now();
 
+      labelDrawn = 0;
       if (view.labelsOn) drawLabels(nodeList, nodeCount, lodCfg, k, hot);
       const tLabel = GFI.util.now();
 
@@ -238,6 +335,11 @@
         total: +(tEnd - t0).toFixed(3),
         nodes: nodeCount,
         edgesN: edgeCount,
+        // labelN = 本帧真正画出的标签数（被占位格挡掉的不计）；
+        // labelCacheN = 精灵缓存条目数。稳定后这个数应该收敛不动 ——
+        // 若它每帧都在涨，说明缓存 key 或失效逻辑坏了。
+        labelN: labelDrawn,
+        labelCacheN: labelCache.size,
         // 排查"连线看不见"用：hot >= 0 时大部分边会被压到 edgeColorDim
         hot: hot,
         边色: hot < 0 ? rcfg.edgeColor : rcfg.edgeColorHi,
@@ -410,17 +512,11 @@
     // -----------------------------------------------------------------------
     // 标签
     // -----------------------------------------------------------------------
-    function measure(text) {
-      let w = measureCache.get(text);
-      if (w === undefined) {
-        w = ctx.measureText(text).width;
-        measureCache.set(text, w);
-      }
-      return w;
-    }
-
+    // （原有一个 measure() + measureText 缓存，从未被任何地方调用过 —— 已经删掉。
+    //   宽度现在由 labelCache 的精灵条目一并提供，见文件上方 makeLabelSprite。）
     function drawLabels(list, count, lodCfg, k, hot) {
       if (!count) return;
+      labelFrame++;      // 精灵缓存的"最近使用"时间戳
 
       // 占位网格
       const cell = rcfg.labelCell;
@@ -450,19 +546,17 @@
       // 这是一条明确的规则，而不是"按名次截一部分"——
       // 视线聚焦在邻域上，其余标签全部让位。
       if (hot >= 0) {
-        ctx.globalAlpha = 1;
-        // 悬浮的那个先画，占位格的优先权归它
-        if (visible[hot]) {
-          ctx.fillStyle = rcfg.labelColorHi;
-          drawOne(hot, cell, cw, ch, x, y, label, radius, scaleMul, k, true);
-        }
-        ctx.fillStyle = rcfg.labelColor;
-        ctx.globalAlpha = rcfg.labelAlpha;
+        // ⚠ 邻域模式【全部不做重叠让位】（force=true）。
+        //   意图是"视线聚焦在邻域上，其余全部让位" —— 那么邻域内部自己就该
+        //   全部显示。之前这里让位，而占位抑制改按整个包围盒标记之后，hub 的
+        //   邻居们（它们本来就聚在一起）开始真的互相挤掉，看起来就是
+        //   "悬浮后连接的节点显示不全"。**让位只属于常态模式。**
+        if (visible[hot]) drawOne(hot, cell, cw, ch, x, y, label, radius, scaleMul, k, true, true);
         for (let p = 0; p < count; p++) {
           const i = list[p];
           if (i === hot || !visible[i] || hl[i] < 2) continue;
           if (renderAlpha[i] < 0.55) continue;
-          drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false);
+          drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, true);
         }
         return;
       }
@@ -471,43 +565,95 @@
       // 分档遍历：度数高的先画、先占住占位格。
       // 直接一趟遍历 nodeList 的话，先到先得的是网格顺序（≈空间顺序），
       // 密集区里谁能留下完全随机，hub 反而可能被叶子挤掉。
-      ctx.fillStyle = rcfg.labelColor;
-      ctx.globalAlpha = rcfg.labelAlpha;
+      // ⚠ 占位格现在是【真抑制】之后，先后顺序从"锦上添花"变成了决定性的 ——
+      //   先画的赢，所以这条名次分档是标签质量的关键。
       const PASSES = 4;
       const step = Math.max(1, Math.ceil((rankCap + 1) / PASSES));
       for (let lo = -1; lo < rankCap; lo += step) {
-        const hi = Math.min(rankCap, lo + step);
+        const hiRank = Math.min(rankCap, lo + step);
         for (let p = 0; p < count; p++) {
           const i = list[p];
           if (!visible[i]) continue;
           const rk = labelRank[i];
-          if (rk <= lo || rk > hi) continue;
+          if (rk <= lo || rk > hiRank) continue;
           if (renderAlpha[i] < 0.55) continue;
-          drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false);
+          drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, false);
         }
       }
     }
 
-    function drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, force) {
-      const text = label[i];
-      if (!text) return;
+    /**
+     * @param {boolean} hi 悬浮/选中的那一个。它每帧至多一个，颜色与 alpha 都与
+     *   常态标签不同，所以【不吃精灵缓存】（直绘）。
+     * @param {boolean} force 跳过重叠让位。邻域模式（模式 A）下全部为 true ——
+     *   悬浮的意图就是把这一圈邻居全亮出来，让位只属于常态模式。
+     */
+    function drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, hi, force) {
+      const full = label[i];
+      if (!full) return;
+      const text = full.length > rcfg.labelMaxChars
+        ? full.slice(0, rcfg.labelMaxChars - 1) + '…'
+        : full;
       const sx = cam.worldToScreenX(x[i]);
       const sy = cam.worldToScreenY(y[i]) - Math.max(3, radius[i] * scaleMul[i] * k + 9);
-      if (sx < -60 || sx > W + 60 || sy < -20 || sy > H + 20) return;
 
-      const gx = (sx / cell) | 0;
-      const gy = (sy / cell) | 0;
-      if (gx < 0 || gy < 0 || gx >= cw || gy >= ch) return;
-      const gi = gy * cw + gx;
-      if (!force && occGrid[gi]) return;             // 密集处互相抑制
-      occGrid[gi] = 1;
+      // 常态标签走精灵缓存（宽度也一起缓存，不再每帧 measureText）；
+      // 悬浮标签直接光栅化 —— 每帧最多一个，不值得为它再开一档缓存。
+      let sprite = null, w, h;
+      if (hi) {
+        ctx.font = rcfg.labelFont;
+        w = Math.ceil(ctx.measureText(text).width) + labelPad * 2;
+        h = labelBoxH;
+      } else {
+        sprite = getLabelSprite(text);
+        w = sprite.w; h = sprite.h;
+      }
 
-      const shown = text.length > rcfg.labelMaxChars
-        ? text.slice(0, rcfg.labelMaxChars - 1) + '…'
-        : text;
-      // 先描边再加字 —— 深色光晕把文字从辉光背景里"抠"出来
-      if (rcfg.labelHaloWidth > 0) ctx.strokeText(shown, sx, sy);
-      ctx.fillText(shown, sx, sy);
+      // 按标签的真实包围盒（而不是落点）判可见 —— 一半在屏幕里就该画
+      const hw = w * 0.5, hh = h * 0.5;
+      if (sx + hw < 0 || sx - hw > W || sy + hh < 0 || sy - hh > H) return;
+
+      if (force) {
+        // 邻域模式：不查也不标占位格 —— 让位在模式 A 里没有意义
+      } else {
+        // ---- 占位：标满整个包围盒 ----
+        // 原先只标 (sx, sy) 落点的那【一格】（labelCell = 14），而 24 字标签实际
+        // 宽 130~160px —— 一格占位等于完全没有抑制，密集处照样互相糊。
+        // （当时那个用来取宽度的 measureText 缓存也压根没被调用过，是死代码。）
+        let gx0 = Math.floor((sx - hw) / cell), gx1 = Math.floor((sx + hw) / cell);
+        let gy0 = Math.floor((sy - hh) / cell), gy1 = Math.floor((sy + hh) / cell);
+        if (gx0 < 0) gx0 = 0;
+        if (gy0 < 0) gy0 = 0;
+        if (gx1 >= cw) gx1 = cw - 1;
+        if (gy1 >= ch) gy1 = ch - 1;
+        if (gx0 > gx1 || gy0 > gy1) return;
+
+        // 与已经画出来的标签重叠 → 让位（名次高的先画，所以留下的是 hub）
+        for (let gy = gy0; gy <= gy1; gy++) {
+          const rowBase = gy * cw;
+          for (let gx = gx0; gx <= gx1; gx++) if (occGrid[rowBase + gx]) return;
+        }
+        for (let gy = gy0; gy <= gy1; gy++) {
+          const rowBase = gy * cw;
+          for (let gx = gx0; gx <= gx1; gx++) occGrid[rowBase + gx] = 1;
+        }
+      }
+
+      labelDrawn++;
+      if (hi) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = rcfg.labelColorHi;
+        // 先描边再加字（font / strokeStyle / lineWidth 由 drawLabels 统一设好）
+        if (rcfg.labelHaloWidth > 0) ctx.strokeText(text, sx, sy);
+        ctx.fillText(text, sx, sy);
+      } else {
+        ctx.globalAlpha = rcfg.labelAlpha;
+        // 贴到设备像素栅格再 blit —— 落在半像素上同样会引入重采样（见 makeLabelSprite）
+        ctx.drawImage(sprite.canvas,
+          Math.round((sx - hw) * dpr) / dpr,
+          Math.round((sy - hh) * dpr) / dpr,
+          w, h);
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -542,7 +688,7 @@
 
     function destroy() {
       spriteCache.clear();
-      measureCache.clear();
+      labelCache.clear();
       nodeList = edgeList = null;
       occGrid = new Uint8Array(0);
     }
@@ -557,7 +703,7 @@
       get bgColor() { return bgColor; },
       get nodeCount() { return nodeCount; },
       get edgeCount() { return edgeCount; },
-      measureCacheSize: () => measureCache.size,
+      labelCacheSize: () => labelCache.size,
     };
   }
 

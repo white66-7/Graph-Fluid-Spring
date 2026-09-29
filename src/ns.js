@@ -1,12 +1,9 @@
 /*
  * GFI — 命名空间与基础工具
  * ===========================================================================
- * 必须最先加载。
- *
  * 命名空间挂在【插件 iframe 自己的 window】上，不挂 top：
  *   挂 top 会和宿主页面、以及其他插件的全局变量冲突。
  *   只有 DOM、计时器、Observer 走 topWin / topDoc。
- *
  * 为什么 DOM/计时必须走 top：
  *   Logseq 插件 iframe 经常是 display:none 或零尺寸的，
  *   隐藏 iframe 的 requestAnimationFrame 永不触发 —— 渲染循环会静默死掉。
@@ -45,15 +42,13 @@
   GFI.topWin = topWin;
   GFI.topDoc = topDoc;
 
-  // -------------------------------------------------------------------------
   // 数学工具
-  // -------------------------------------------------------------------------
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const lerp = (a, b, t) => a + (b - a) * t;
 
   function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
-  // 确定性整数哈希 → [0,1)。用于每节点稳定抖动（不能每帧变，否则会闪）
+  // 确定性整数哈希 → [0,1)
   function hash11(i) {
     let x = Math.imul((i | 0) ^ 0x9e3779b9, 0x85ebca6b);
     x ^= x >>> 13;

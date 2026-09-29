@@ -218,7 +218,11 @@
 
       if (w <= 0 || (s.t > 0.20 && speed < s.stopVel && dist < s.stopDist) || s.t > cfg.drag.maxSettleTime) {
         settle = null;
-        sim.reheat(cfg.reheat.dragRelease);
+        // 只有【有邻居】的节点才重热 —— 与 interaction.js 松手处同一条规则。
+        // 零度节点甩完就该安安静静停住，不该把整张图一起晃起来。
+        // （零度节点这条路径同时也不 reheat，所以模拟全程睡着，正是 main.js
+        //   必须无条件推进 handoff、并按需 rebuildGrid 的原因。）
+        if (D.deg[i] > 0) sim.reheat(cfg.reheat.dragRelease);
       }
     };
 
