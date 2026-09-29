@@ -544,9 +544,11 @@
        */
       setRender(partial) {
         if (!partial) return cfg.render;
-        // nodeSize 是在 Data.build 里烘进 D.radius 的 —— 光改配置不生效，
+        // radius 相关参数是在 Data.build 里烘进 D.radius 的 —— 光改配置不生效，
         // 必须重建管线。顺手代劳，省得调参时还要记得手动 rebuild。
-        const needRebuild = partial.nodeSize !== undefined;
+        const needRebuild = partial.nodeSize !== undefined ||
+          partial.radiusBase !== undefined || partial.radiusScale !== undefined ||
+          partial.radiusMin !== undefined || partial.radiusMax !== undefined;
         for (const k in partial) {
           if (k === 'palette') Object.assign(cfg.render.palette, partial.palette);
           else cfg.render[k] = partial[k];

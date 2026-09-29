@@ -20,15 +20,10 @@
       chargeFalloff: 0,
       chargeDegGain: 0.5,     // 斥力随度数增长：×(1 + gain·√deg)
       chargeDegCap: 8,        // 上述倍率的上限
-      distanceMin: 12,        // 软化近距奇点
+      distanceMin: 16,        // 软化近距奇点（配合增大后的节点半径）
       distanceMax: 420,       // 斥力截断半径
-      // 边长。
-      //   62 → 拥挤度 2.38、屏幕线长 40px
-      //   40 → 拥挤度 1.91、屏幕线长 28px   ← 这里
-      //   32 → 拥挤度 1.74、屏幕线长 25px
-      //   22 → 拥挤度 1.54、屏幕线长 17px（偏挤）
-      // 要调"看起来的疏密"配合 render.nodeSize 一起用。
-      linkDistance: 40,
+      // 🌟 Obsidian 黄金比例连线距离：相连节点间距约 28~32 屏幕像素
+      linkDistance: 45,
       linkStrength: 0.3,      // 边刚度
       velocityRetain: 0.80,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
@@ -38,7 +33,7 @@
       gravityDeadzone: 40,    // 死区半径
       centerStrength: 0.02,   // 刚性回正
       alphaMin: 0.001,
-      collideCell: 32,        // 碰撞微网格边长
+      collideCell: 48,        // 碰撞微网格边长（容纳放大后的 hub 节点）
 
       // 零度节点（无连边）锚定外圈环
       isolatedRing: {
@@ -134,31 +129,26 @@
       bgFallback: '#0d0f14',
       bgCssVar: '--ls-primary-background-color',
 
-      radiusBase: 2.0,
-      radiusScale: 0.95,
-      radiusMin: 2.0,
-      radiusMax: 14,
-      // 节点大小总倍率。这是【真正独立于线长】的那一个旋钮：
-      // 拥挤度 = 最近邻间距 / 节点直径，而间距由 linkDistance 决定、
-      // 直径由这里决定 —— 两个量正交，所以放大节点可以在【完全不动布局】
-      // 的前提下让图读起来更密。
-      // ⚠ 它同时会放大碰撞半径（物理里按 radius 推挤），所以放大到一定程度
-      //   节点会被碰撞顶开、间距跟着变大，拥挤度不再线性跟随 —— 范围上限
-      //   卡在 2.5 就是为了这个。
-      // 1.15 配 linkDistance 40 → 拥挤度 ≈ 1.66（"近但没到挤"）。
-      // 想更密就往上加，2.0 大约到 1.34，2.5 是 1.13（快糊了）。
-      nodeSize: 1.15,
+      // 🌟 Obsidian 风格节点尺寸：叶子节点直径约 6~7px，核心 hub 直径约 14~20px，
+      // 摆脱原有 1px 尘埃质感，呈现出星图般的晶莹实体感。
+      radiusBase: 5.0,
+      radiusScale: 1.8,
+      radiusMin: 4.0,
+      radiusMax: 22.0,
+      nodeSize: 1.0,
 
-      glowRadiusBuckets: [3, 4, 6, 8, 11, 16, 22],
-      glowSpread: 2.0,
+      glowRadiusBuckets: [5, 7, 10, 14, 18, 24],
+      glowSpread: 1.8,
 
-      edgeColor: 'rgba(180,200,230,0.75)',
-      edgeColorDim: 'rgba(180,200,230,0.22)',
+      // 🌟 Obsidian 风格连线：半透明纤细星轨（0.38 alpha），让节点成为视觉主角；
+      // hover 时高亮爆发（0.95 alpha），背景自动压暗（0.12 alpha）。
+      edgeColor: 'rgba(180,200,230,0.38)',
+      edgeColorDim: 'rgba(180,200,230,0.12)',
       edgeColorHi: 'rgba(160,200,255,0.95)',
-      edgeWidthMin: 1.0,
-      edgeWidthMax: 2.5,
-      edgeWidthBase: 0.8,
-      edgeWidthSlope: 0.6,
+      edgeWidthMin: 0.8,
+      edgeWidthMax: 2.2,
+      edgeWidthBase: 0.7,
+      edgeWidthSlope: 0.4,
 
       labelShowScaleRatio: 0.60,
       labelHideScaleRatio: 0.50,
@@ -330,8 +320,8 @@
       key: 'linkDistance',
       type: 'number',
       title: '🔗 连接线长度 / Link Distance',
-      description: '相连节点之间的静止距离。(default 82)',
-      default: 82,
+      description: '相连节点之间的静止距离。(default 45)',
+      default: 45,
     },
     {
       key: 'velocityRetain',
@@ -430,11 +420,11 @@
     if (bind) item.default = bind();
   }
 
-  // 🌟 11：linkDistance 82 → 40、新增 nodeSize。
+  // 🌟 12：升级为 Obsidian 黄金比例配置（节点尺寸/辉光桶位/连线透明度/线长45）。
   // ⚠ 提升版本号的【代价】是 fresh 分支会把所有面板设置重置成 configDefaults，
   //   然后写回 Logseq —— 这是设计用途（换一套新默认值），不是 bug。
   //   受影响最大的是 hideNames 那个自定义过滤文本框（它只在面板里，config 里没有）。
-  GFI.CFG_VERSION = 11;
+  GFI.CFG_VERSION = 12;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
