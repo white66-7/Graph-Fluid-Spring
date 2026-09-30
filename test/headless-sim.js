@@ -835,6 +835,47 @@ section('12. 拖拽手感的前提 —— reheat 必须瞬时，alphaTarget 必�
 })();
 
 // ===========================================================================
+section('13. 沉降后不得残留节点重叠');
+// ===========================================================================
+// 用户实测截图里出现过成对叠死的节点。根因是碰撞的 alpha 门控
+// （a > 0.05 才跑），而 isolatedRing 不乘 alpha —— 尾段节点仍在动、碰撞停了，
+// 重叠被冻结。解开门控后这条必须成立。
+// 判据：交叠深度 > 10%（d < 0.9 × (ri+rj)）算失败；轻微软碰（碰撞正在
+// 推开的瞬间）不算。
+(function testNoOverlapAfterSettle() {
+  // 复用 §2 已沉降 900 tick 的顶层 D
+  let overlap = 0, worst = 0, worstPair = '';
+  for (let i = 0; i < D.n; i++) {
+    if (!D.visible[i] || D.simWeight[i] === 0) continue;
+    for (let j = i + 1; j < D.n; j++) {
+      if (!D.visible[j] || D.simWeight[j] === 0) continue;
+      const dx = D.x[i] - D.x[j], dy = D.y[i] - D.y[j];
+      const d2 = dx * dx + dy * dy;
+      const rr = D.radius[i] + D.radius[j];
+      if (d2 < rr * rr * 0.81) {
+        overlap++;
+        const pen = 1 - Math.sqrt(d2) / rr;
+        if (pen > worst) { worst = pen; worstPair = D.label[i] + ' ↔ ' + D.label[j]; }
+      }
+    }
+  }
+  check('沉降后无 >10% 交叠的节点对', overlap === 0,
+    `${overlap} 对，最深 ${(worst * 100).toFixed(0)}% ${worstPair}`);
+
+  // 完全重合的对（d2 ≈ 0）也必须不存在 —— 那种对在旧代码里会被永久跳过
+  let stacked = 0;
+  for (let i = 0; i < D.n; i++) {
+    if (!D.visible[i] || D.simWeight[i] === 0) continue;
+    for (let j = i + 1; j < D.n; j++) {
+      if (!D.visible[j] || D.simWeight[j] === 0) continue;
+      const dx = D.x[i] - D.x[j], dy = D.y[i] - D.y[j];
+      if (dx * dx + dy * dy < 1e-6) stacked++;
+    }
+  }
+  check('无完全重合的节点对', stacked === 0, `${stacked} 对`);
+})();
+
+// ===========================================================================
 // 结果
 // ===========================================================================
 console.log(`\n${'═'.repeat(60)}`);

@@ -111,7 +111,9 @@ function section(t) { console.log(`\n\x1b[36m━━━ ${t} ━━━\x1b[0m`); 
 // 场景搭建
 // ---------------------------------------------------------------------------
 // 视口 400×400、k=1、相机在原点 → 屏幕坐标 = 世界坐标 + 200。
-// 节点度数 0 → radius = radiusBase = 2 → 标签画在节点上方 max(3, 2+9) = 11px 处。
+// 🌟 标签是 Obsidian 摆放：文字【左对齐】画在节点右侧 6px、垂直居中于节点。
+//    place(i, sx, sy) 的语义因此是【文字左缘、垂直中线】——不是节点圆心。
+// 节点度数 0 → radius = clamp(radiusBase, min, max) × nodeSize = 5。
 const SCREEN_OFF = VW / 2;
 
 function screenToWorldX(sx) { return sx - SCREEN_OFF; }
@@ -124,20 +126,26 @@ const BOX_H = Math.ceil(FONT_PX * 1.3) + PAD * 2;                 // 16 + 8 = 24
 const labelW = (str) => Math.ceil(str.length * 7) + PAD * 2;      // 7 字符 → 57
 
 function makeScene(labels) {
-  const nodes = labels.map((s, i) => ({ id: 'n' + i, label: s, kind: 'page' }));
+  // 条目可以是字符串（默认 kind=page）或 {label, kind}
+  const nodes = labels.map((s, i) => ({
+    id: 'n' + i,
+    label: typeof s === 'string' ? s : s.label,
+    kind: typeof s === 'string' ? 'page' : (s.kind || 'page'),
+  }));
   const D = GFI.Data.build(nodes, [], null);
   const cam = GFI.Camera.create(VW, VH);
   cam.k = 1; cam.x = 0; cam.y = 0;
   const canvas = makeStubCanvas();
   const renderer = GFI.Renderer.create(canvas, D, cam);
   renderer.resize(VW, VH, DPR);
-  // 直接摆到指定屏幕坐标上
+  // 直接摆到指定屏幕坐标上（sx = 文字左缘，sy = 文字垂直中线）
   return {
     D, cam, renderer, canvas,
     ctx: canvas.getContext('2d'),
     place(i, sx, sy) {
-      D.x[i] = screenToWorldX(sx);
-      D.y[i] = screenToWorldY(sy) + Math.max(3, D.radius[i] * D.scaleMul[i] * cam.k + 9);
+      const rScr = Math.max(2, D.radius[i] * D.scaleMul[i] * cam.k);
+      D.x[i] = screenToWorldX(sx - 6 - rScr);   // 节点圆心在文字左缘左侧 6+r 处
+      D.y[i] = screenToWorldY(sy);              // 文字中线 == 节点圆心 y
     },
     draw(view) {
       const c = canvas.getContext('2d');
@@ -148,28 +156,35 @@ function makeScene(labels) {
   };
 }
 
+// 包围盒：x ∈ [左缘-PAD, 左缘-PAD+w]，y ∈ [中线±h/2]
+function labelBox(sx, sy, str) {
+  const w = labelW(str), hh = BOX_H / 2;
+  return { x0: sx - PAD, x1: sx - PAD + w, y0: sy - hh, y1: sy + hh };
+}
+
 // ===========================================================================
 section('1. 占位抑制 —— 相邻标签必须互相让位');
 // ===========================================================================
 (function testOverlapSuppression() {
   const S = makeScene(['abcdefg', 'abcdefg']);
-  // 屏幕 x = 100 / 130（相距 30px），同一 y → 两个标签的包围盒必然重叠
+  // 文字左缘 x = 100 / 130（相距 30px），同一 y → 两个包围盒必然重叠
   S.place(0, 100, 200);
   S.place(1, 130, 200);
 
-  const w = labelW('abcdefg'), hw = w / 2, sy = 200 - 11;
-  const boxA = [100 - hw, 100 + hw], boxB = [130 - hw, 130 + hw];
-  const overlap = boxA[1] > boxB[0] && boxB[1] > boxA[0];
+  const boxA = labelBox(100, 200, 'abcdefg');
+  const boxB = labelBox(130, 200, 'abcdefg');
+  const overlap = boxA.x1 > boxB.x0 && boxB.x1 > boxA.x0;
 
-  // 关键前提：两者的【落点格】不同 —— 所以旧的"只标一格"逻辑对 B 是放行的
+  // 关键前提：两者包围盒的【左上角落点格】不同 —— 所以旧的"只标一格"逻辑对 B 是放行的
   const cell = GFI.config.render.labelCell;
-  const cellA = Math.floor(100 / cell), cellB = Math.floor(130 / cell);
+  const cellA = Math.floor(boxA.x0 / cell), cellB = Math.floor(boxB.x0 / cell);
 
   check('前提：两个标签的包围盒重叠', overlap,
-    `A=[${boxA[0].toFixed(0)},${boxA[1].toFixed(0)}] B=[${boxB[0].toFixed(0)},${boxB[1].toFixed(0)}]`);
+    `A=[${boxA.x0.toFixed(0)},${boxA.x1.toFixed(0)}] B=[${boxB.x0.toFixed(0)},${boxB.x1.toFixed(0)}]`);
   check('前提：两者落点格不同（旧逻辑会放行 B）', cellA !== cellB,
     `格 ${cellA} vs ${cellB}（cell=${cell}）`);
-  check('前提：两者在同一个 y 带上', Math.abs(sy) >= 0 && hw === hw, `标签 y = ${sy}`);
+  check('前提：两者在同一个 y 带上', boxA.y0 === boxB.y0 && boxA.y1 === boxB.y1,
+    `y ∈ [${boxA.y0}, ${boxA.y1}]`);
 
   const st = S.draw();
   check('重叠的第二个标签被抑制', st.labelN === 1, `画出 ${st.labelN} 个（期望 1）`);
@@ -283,15 +298,39 @@ section('5. 尺寸 / 视口裁剪');
   const stIn = S.draw();
   check('正常位置能画出', stIn.labelN === 1, `labelN=${stIn.labelN}`);
 
-  // 标签中心推到屏幕右侧外，但仍有一半可见 → 应该还画（新旧逻辑的分界点）
-  S.place(0, VW + 10, 200);
+  // 包围盒左缘在视口内、右缘溢出 → 仍画（按真实包围盒判可见）
+  S.place(0, VW - 20, 200);
   const stHalf = S.draw();
-  check('一半在视口外仍画（按包围盒判可见）', stHalf.labelN === 1, `labelN=${stHalf.labelN}`);
+  check('一部分在视口外仍画（按包围盒判可见）', stHalf.labelN === 1, `labelN=${stHalf.labelN}`);
 
-  // 完全推出视口 → 不画
-  S.place(0, VW + labelW('abcdefg'), 200);
+  // 包围盒整体推出视口右缘 → 不画
+  S.place(0, VW + 10, 200);
   const stOut = S.draw();
   check('完全移出视口不画', stOut.labelN === 0, `labelN=${stOut.labelN}`);
+})();
+
+// ===========================================================================
+section('6. 日记标签默认不显示（config.render.labelJournal）');
+// ===========================================================================
+(function testJournalLabel() {
+  const S = makeScene(['我的页面', { label: '2026-09-28 Mon', kind: 'journal' }]);
+  // 摆开，互不重叠
+  S.place(0, 80, 200);
+  S.place(1, 280, 200);
+
+  const stOff = S.draw();
+  check('默认：日记节点只显示圆点不显示名字', stOff.labelN === 1,
+    `labelN=${stOff.labelN}（期望 1，只有页面）`);
+
+  GFI.config.render.labelJournal = true;
+  const stOn = S.draw();
+  check('开启 labelJournal 后日记名字显示', stOn.labelN === 2, `labelN=${stOn.labelN}`);
+  GFI.config.render.labelJournal = false;
+
+  // 悬浮日记节点：邻域模式（模式 A）不受开关影响 —— 想读日期正是悬浮时
+  const stHover = S.draw({ hoverIdx: 1 });
+  check('悬浮日记节点时名字仍显示（模式 A 不受开关影响）', stHover.labelN === 1,
+    `labelN=${stHover.labelN}（期望 1，悬浮的那个）`);
 })();
 
 // ===========================================================================

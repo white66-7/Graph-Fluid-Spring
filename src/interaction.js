@@ -323,6 +323,21 @@
           return;
         }
 
+        // ---- 🌟 Obsidian 式松手：钉在放下点，邻域围着它重排 ----
+        // 探针实测（test/uniformity-probe.js）：只要松手后把节点交还给模拟，
+        // 弹簧就会把它往邻居方向拽回 ~60% 拖距 —— 回漂量只取决于松手瞬间
+        // 弹簧的拉伸量，跟拖得多慢、悬停多久都无关。所以「停在放下点」只能
+        // 靠保持 PIN_HARD 实现：applyPins 每 tick 钉死坐标，所有力都跳过它，
+        // 而邻居照常受力 → 围绕新锚点重新排布（正是 Obsidian 的观感）。
+        // 解除固定：右键节点（见下方 onContextMenu）。
+        if (cfg.drag.stickOnRelease) {
+          // 节点此刻仍处于 pointerdown 时的 pin，坐标 = 最后一次 pin 的放下点，
+          // 什么都不用写 —— 只需重热让邻域动起来。
+          if (D.deg[i] > 0) sim.reheat(cfg.reheat.dragRelease);
+          wake();
+          return;
+        }
+
         // ---- 松手：解析解沉降 + 加权混合交接 ----
         trailPush(sx, sy, now);
         trailPrune(now);
@@ -407,6 +422,26 @@
       fx.cancelSettle();
     }
 
+    // -----------------------------------------------------------------------
+    // 右键 = 固定 / 解除固定（stickOnRelease 的解除通道）
+    // pointerdown 对 mouse 的 button!==0 已早退，右键不会触发平移/抓取。
+    // -----------------------------------------------------------------------
+    function onContextMenu(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const [sx, sy] = localPoint(e);
+      const hit = hitTest(sx, sy);
+      if (hit < 0) return;
+      if (sim.isPinned(hit)) {
+        sim.unpin(hit);
+        // 解放回物理：轻微重热，让它漂回自己的弹簧平衡位
+        if (D.deg[hit] > 0) sim.reheat(cfg.reheat.dragRelease);
+      } else {
+        sim.pin(hit, D.x[hit], D.y[hit]);
+      }
+      wake();
+    }
+
     function onWheel(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -445,7 +480,7 @@
     reg.add(canvas, 'pointercancel', onPointerCancel);
     reg.add(canvas, 'pointerleave', onPointerLeave);
     reg.add(canvas, 'wheel', onWheel, { passive: false });
-    reg.add(canvas, 'contextmenu', (e) => e.stopPropagation());
+    reg.add(canvas, 'contextmenu', onContextMenu);
     reg.add(GFI.topWin, 'keydown', onKeyDown);
 
     inter.destroy = function destroy() {

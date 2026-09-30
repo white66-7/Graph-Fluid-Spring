@@ -176,7 +176,7 @@
     // 标签精灵
     // -----------------------------------------------------------------------
     function makeLabelSprite(text) {
-      // 必须先量宽度再建画布 —— 尺寸要按内容裁，不然 240 个标签就是 240 张
+      // 必须先量宽度再建画布 —— 尺寸要按内容裁，不然几百个标签就是几百张
       // 全宽的图，内存全浪费。量之前显式设一次 font，不依赖外面设过。
       ctx.font = rcfg.labelFont;
       const wCss = Math.ceil(ctx.measureText(text).width) + labelPad * 2;
@@ -194,20 +194,22 @@
       const g = c.getContext('2d');
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.font = rcfg.labelFont;
-      g.textAlign = 'center';
+      // 🌟 Obsidian 摆放：文字【左对齐】画在节点右侧 —— 精灵内部同样左对齐，
+      //   文字左缘 = labelPad。blit 时把精灵左缘对到 (sx - labelPad) 即可。
+      g.textAlign = 'left';
       g.textBaseline = 'middle';
       g.lineJoin = 'round';
       g.miterLimit = 2;
 
-      const cx = devW / dpr * 0.5, cy = devH / dpr * 0.5;
+      const ty = devH / dpr * 0.5;
       // 先描边再加字 —— 深色光晕把文字从辉光背景里"抠"出来（与主 ctx 同一套参数）
       if (rcfg.labelHaloWidth > 0) {
         g.strokeStyle = rcfg.labelHaloColor;
         g.lineWidth = rcfg.labelHaloWidth;
-        g.strokeText(text, cx, cy);
+        g.strokeText(text, labelPad, ty);
       }
       g.fillStyle = rcfg.labelColor;
-      g.fillText(text, cx, cy);
+      g.fillText(text, labelPad, ty);
 
       return { canvas: c, w: devW / dpr, h: devH / dpr };
     }
@@ -528,11 +530,17 @@
         occGrid.fill(0);
       }
 
-      const { x, y, label, labelRank, radius, renderAlpha, scaleMul, visible, hl } = D;
+      const { x, y, label, labelRank, radius, renderAlpha, scaleMul, visible, hl, kind } = D;
+      const JK = D.KIND.journal;
+      // 🌟 日记默认不显示名字（config.render.labelJournal，Obsidian 式）。
+      // 只作用于常态模式 B —— 悬浮（模式 A）不受影响：想读某颗绿点是哪天，
+      // hover 一下就行，那一刻正是"要读名字"的时候。
+      const journalLabelsOn = !!rcfg.labelJournal;
       const n = D.n;
       // labelRank 是均匀分布在 0..255 的名次（0 = 度数最高）；据此换算阈值按名次截断。
-      // 取两个上限的较小者：LOD 档位的 labelCap，以及按节点总数算的比例上限 ——
-      // 后者保证小图谱也不会"每个节点都带标签"。
+      // 取两个上限的较小者：LOD 档位的 labelCap，以及按节点总数算的比例上限。
+      // 🌟 labelMaxRatio 默认 1.0（Obsidian 行为：全部节点都是候选）之后，
+      //   rankCap 基本恒为 255 —— 名次分档只剩"先画谁"的作用（占位让位时 hub 优先）。
       const cap = Math.min(lodCfg.labelCap, Math.max(8, Math.round(n * rcfg.labelMaxRatio)));
       const rankCap = n > 1 ? Math.min(255, Math.floor((cap / (n - 1)) * 255)) : 255;
 
@@ -541,6 +549,8 @@
       ctx.lineWidth = rcfg.labelHaloWidth;
       ctx.lineJoin = 'round';
       ctx.miterLimit = 2;
+      // 🌟 Obsidian 摆放：文字左对齐（resize 里的全局默认是 center）
+      ctx.textAlign = 'left';
 
       // ---- 模式 A：悬浮/选中时，只显示该节点与它直接相连的邻居 ----
       // 这是一条明确的规则，而不是"按名次截一部分"——
@@ -574,6 +584,8 @@
         for (let p = 0; p < count; p++) {
           const i = list[p];
           if (!visible[i]) continue;
+          // 日记标签开关在【精灵创建之前】跳过 —— 顺便不为不会画的标签预热缓存
+          if (!journalLabelsOn && kind[i] === JK) continue;
           const rk = labelRank[i];
           if (rk <= lo || rk > hiRank) continue;
           if (renderAlpha[i] < 0.55) continue;
@@ -591,11 +603,17 @@
     function drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, hi, force) {
       const full = label[i];
       if (!full) return;
-      const text = full.length > rcfg.labelMaxChars
+      // 🌟 labelMaxChars = 0 表示【从不截断】（Obsidian 行为：名字永远显示全）。
+      const text = rcfg.labelMaxChars > 0 && full.length > rcfg.labelMaxChars
         ? full.slice(0, rcfg.labelMaxChars - 1) + '…'
         : full;
-      const sx = cam.worldToScreenX(x[i]);
-      const sy = cam.worldToScreenY(y[i]) - Math.max(3, radius[i] * scaleMul[i] * k + 9);
+
+      // 🌟 Obsidian 摆放：名字画在节点【右侧】、垂直居中于节点、左对齐 ——
+      //   不再居中悬在上方。右置的好处：名字沿着连线的走向排开，节点之间
+      //   天然多出水平空间，观感上就是"每个节点都有自己的位置"。
+      const rScr = Math.max(2, radius[i] * scaleMul[i] * k);
+      const sx = cam.worldToScreenX(x[i]) + rScr + 6;   // 文字【左缘】
+      const sy = cam.worldToScreenY(y[i]);               // 垂直中线
 
       // 常态标签走精灵缓存（宽度也一起缓存，不再每帧 measureText）；
       // 悬浮标签直接光栅化 —— 每帧最多一个，不值得为它再开一档缓存。
@@ -609,18 +627,19 @@
         w = sprite.w; h = sprite.h;
       }
 
-      // 按标签的真实包围盒（而不是落点）判可见 —— 一半在屏幕里就该画
-      const hw = w * 0.5, hh = h * 0.5;
-      if (sx + hw < 0 || sx - hw > W || sy + hh < 0 || sy - hh > H) return;
+      // 包围盒：x ∈ [sx-pad, sx-pad+w]（文字左缘 sx，pad 留给描边外溢），
+      // y ∈ [sy-h/2, sy+h/2]。按真实包围盒判可见 —— 一半在屏幕里就该画。
+      const bx0 = sx - labelPad, hh = h * 0.5;
+      const bx1 = bx0 + w;
+      if (bx1 < 0 || bx0 > W || sy + hh < 0 || sy - hh > H) return;
 
       if (force) {
         // 邻域模式：不查也不标占位格 —— 让位在模式 A 里没有意义
       } else {
         // ---- 占位：标满整个包围盒 ----
-        // 原先只标 (sx, sy) 落点的那【一格】（labelCell = 14），而 24 字标签实际
-        // 宽 130~160px —— 一格占位等于完全没有抑制，密集处照样互相糊。
-        // （当时那个用来取宽度的 measureText 缓存也压根没被调用过，是死代码。）
-        let gx0 = Math.floor((sx - hw) / cell), gx1 = Math.floor((sx + hw) / cell);
+        // 原先只标落点的那【一格】（labelCell = 14），而长标签实际宽上百 px ——
+        // 一格占位等于完全没有抑制。密集处的取舍全靠这里。
+        let gx0 = Math.floor(bx0 / cell), gx1 = Math.floor(bx1 / cell);
         let gy0 = Math.floor((sy - hh) / cell), gy1 = Math.floor((sy + hh) / cell);
         if (gx0 < 0) gx0 = 0;
         if (gy0 < 0) gy0 = 0;
@@ -643,14 +662,15 @@
       if (hi) {
         ctx.globalAlpha = 1;
         ctx.fillStyle = rcfg.labelColorHi;
-        // 先描边再加字（font / strokeStyle / lineWidth 由 drawLabels 统一设好）
+        // 先描边再加字（font / strokeStyle / lineWidth / textAlign 由 drawLabels 设好）
         if (rcfg.labelHaloWidth > 0) ctx.strokeText(text, sx, sy);
         ctx.fillText(text, sx, sy);
       } else {
         ctx.globalAlpha = rcfg.labelAlpha;
+        // 精灵内部文字左缘在 labelPad 处 → 精灵左缘 = bx0。
         // 贴到设备像素栅格再 blit —— 落在半像素上同样会引入重采样（见 makeLabelSprite）
         ctx.drawImage(sprite.canvas,
-          Math.round((sx - hw) * dpr) / dpr,
+          Math.round(bx0 * dpr) / dpr,
           Math.round((sy - hh) * dpr) / dpr,
           w, h);
       }

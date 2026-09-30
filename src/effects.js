@@ -67,12 +67,19 @@
     // -----------------------------------------------------------------------
     // 计数（用于空闲判定）
     // -----------------------------------------------------------------------
-    let popCount = 0;
-    let fadeCount = 0;
+    // 🌟 T3 活跃索引列表：pop/fade 的逐帧推进从「全表 O(n) 扫描」改成「只扫活跃项」。
+    //   播放期间 popCount 几乎恒 >0，旧实现对 5000 节点图是每帧几千次无效分支。
+    //   popN/fadeN 是唯一事实来源，popCount/fadeCount 变成它们的只读别名 ——
+    //   对外 getter、anyActive、§10 的计数器断言语义全部不变。
+    //   ⚠ 不变量：列表里的每个 i 必有 popT[i]（fadeT[i]）为数字 —— 所有把
+    //   T 置回 NaN 的路径（自然结束 / cancelHide / 被隐藏打断）都必须同步摘除。
+    const popList = new Int32Array(n);
+    const fadeList = new Int32Array(n);
+    let popN = 0, fadeN = 0;
 
     const fx = {
-      get popCount() { return popCount; },
-      get fadeCount() { return fadeCount; },
+      get popCount() { return popN; },
+      get fadeCount() { return fadeN; },
       get settleActive() { return settle !== null; },
     };
 
@@ -84,7 +91,7 @@
       D.visible[i] = 1;
       D.wantVisible[i] = 1;
 
-      if (D.popT[i] !== D.popT[i]) popCount++;
+      if (D.popT[i] !== D.popT[i]) popList[popN++] = i;
       D.popT[i] = -Math.max(0, delay || 0);
       D.popDur[i] = popDuration();
       D.scaleMul[i] = 1;
@@ -102,7 +109,7 @@
       if (D.fadeT[i] === D.fadeT[i] && D.fadeT[i] >= 0) return;
       D.fadeT[i] = 0;
       D.fadeFrom[i] = D.simWeight[i];
-      fadeCount++;
+      fadeList[fadeN++] = i;
     };
 
     fx.cancelHide = function cancelHide(i) {
@@ -112,7 +119,9 @@
       D.renderAlpha[i] = 1;
       D.scaleMul[i] = 1;
       D.simWeight[i] = D.fadeFrom[i] > 0 ? D.fadeFrom[i] : 1;
-      fadeCount = Math.max(0, fadeCount - 1);
+      for (let k = 0; k < fadeN; k++) {
+        if (fadeList[k] === i) { fadeList[k] = fadeList[--fadeN]; break; }
+      }
       return true;
     };
 

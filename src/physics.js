@@ -397,13 +397,20 @@
       const cellStart = collideGrid.cellStart, items = collideGrid.items;
       const inv = collideGrid.inv, gMinX = collideGrid.minX, gMinY = collideGrid.minY;
 
+      // 🌟 d3 forceCollide 的 padding 约定：每节点外扩 pad，两节点静止间距 =
+      //   r_i + r_j + 2·pad。没有它，斥力/弹簧/重力的压力会把节点一路压到
+      //   【接触距离】才停（实测最近邻 p10 = 13.6 ≈ 两片叶子半径之和 6.8+6.8，
+      //   表现就是整团挤成一坨）；有了它，节点之间永远留出可见空隙。
+      const pad2 = cfg.collidePad * 2;
+
       for (let it = 0; it < iterations; it++) {
         for (let i = 0; i < n; i++) {
           if (!activeMask[i] || pinMode[i] === PIN_HARD) continue;
           const xi = x[i], yi = y[i], ri = radius[i];
           // 自己的半径 + 可能遇到的最大半径 = 需要扫描的半边长。
           // 小节点自动用小框（比原来固定 16 还快），hub 用大框（不漏检）。
-          const maxR = ri + maxNodeR;
+          // ⚠ 2·pad 必须计入搜索半径，否则 padding 大了会漏检最远的一对。
+          const maxR = ri + maxNodeR + pad2;
 
           let cx0 = ((xi - maxR - gMinX) * inv) | 0;
           let cy0 = ((yi - maxR - gMinY) * inv) | 0;
@@ -422,14 +429,24 @@
               for (let p = cellStart[c]; p < end; p++) {
                 const j = items[p];
                 if (j <= i || !activeMask[j]) continue;
-                const dx = x[j] - xi, dy = y[j] - yi;
+                let dx = x[j] - xi, dy = y[j] - yi;
                 const d2 = dx * dx + dy * dy;
-                const rr = ri + radius[j];
-                if (d2 >= rr * rr || d2 === 0) continue;
-                const d = Math.sqrt(d2);
+                const rr = ri + radius[j] + pad2;
+                if (d2 >= rr * rr) continue;
+                let d, ux, uy;
+                if (d2 < 1e-12) {
+                  // ⚠ 完全重合：归一化方向未定义，`d2 === 0` 直接 continue 会把
+                  //   这对节点【永久】留在叠死状态（数据重载按 id 继承位置时
+                  //   可能产生）。用确定性哈希取方向把 j 推开。
+                  const a0 = GFI.util.hash11s(j, 91) * Math.PI * 2;
+                  ux = Math.cos(a0); uy = Math.sin(a0);
+                  d = 1;                        // overlap = rr-1 ≈ rr，正好一次推到接触
+                } else {
+                  d = Math.sqrt(d2);
+                  ux = dx / d; uy = dy / d;
+                }
                 const overlap = rr - d;
                 const push = overlap * 0.5 * cfg.collideStrength;
-                const ux = dx / d, uy = dy / d;
                 if (pinMode[i] !== PIN_HARD) { x[i] -= ux * push; y[i] -= uy * push; }
                 if (pinMode[j] !== PIN_HARD) { x[j] += ux * push; y[j] += uy * push; }
               }
@@ -475,8 +492,14 @@
 
       integrate(dt, damp);
 
-      // 碰撞需要自己的微网格 —— 节点位置刚变过，必须重建
-      if (lodCfg.collideIter > 0 && a > 0.05) {
+      // 碰撞需要自己的微网格 —— 节点位置刚变过，必须重建。
+      // ⚠ 这里【不能用 alpha 门控】（曾经写 a > 0.05 才跑，是个真 bug）：
+      //   alpha ∈ (alphaMin, 0.05) 的尾段里节点仍在被移动 —— isolatedRing 的拉力
+      //   刻意不乘 alpha（否则模拟一沉降孤立节点就飘回去），残余的弹簧力也还没
+      //   归零 —— 而碰撞停了，于是这段窗口里产生的重叠被【永久冻结】在最终布局
+      //   里，表现就是图上成对叠在一起的节点。碰撞是位置修正不是力，只要醒着
+      //   就必须每 tick 跑。
+      if (lodCfg.collideIter > 0) {
         collideGrid.build(D, activeMask);
         forceCollide(lodCfg.collideIter);
       }
@@ -507,6 +530,12 @@
     sim.unpin = function unpin(i) {
       if (i < 0 || i >= n) return;
       pinMode[i] = PIN_NONE;
+    };
+
+    // 右键固定/解除固定（interaction.js 的 contextmenu）需要读当前 pin 态
+    sim.isPinned = function isPinned(i) {
+      if (i < 0 || i >= n) return false;
+      return pinMode[i] === PIN_HARD;
     };
 
     sim.isAwake = function isAwake() { return sim.alpha > sim.alphaMin; };

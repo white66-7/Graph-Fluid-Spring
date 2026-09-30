@@ -16,20 +16,32 @@
     // 物理
     // =======================================================================
     physics: {
-      charge: -0.10,          // 整体疏密。绝对值×1.5 更空灵，×0.6 更结团
+      // 🌟 -0.12（原 -0.10）：配合 collidePad 一起把团簇之间推开 —— 实测
+      //   500 节点最近邻间距变异系数 CV 0.888 → 0.379（探针 test/uniformity-probe.js）。
+      charge: -0.12,          // 整体疏密。绝对值×1.5 更空灵，×0.6 更结团
       chargeFalloff: 0,
       chargeDegGain: 0.5,     // 斥力随度数增长：×(1 + gain·√deg)
       chargeDegCap: 8,        // 上述倍率的上限
       distanceMin: 16,        // 软化近距奇点（配合增大后的节点半径）
       distanceMax: 420,       // 斥力截断半径
-      // 🌟 Obsidian 黄金比例连线距离：相连节点间距约 28~32 屏幕像素
-      linkDistance: 45,
+      // 🌟 Obsidian 黄金比例连线距离：相连节点间距约 30~34 屏幕像素。
+      // 名字画在节点右侧后，水平方向要多留出标签的空间，所以比纯节点比例
+      // 略大一档（45 → 50）。
+      linkDistance: 50,
       linkStrength: 0.3,      // 边刚度
       velocityRetain: 0.80,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
-      collideStrength: 0.85,  // 重叠消解强度
+      collideStrength: 1.0,   // 重叠消解强度（1 = d3 forceCollide 约定：每遍完全解消）
+      // 🌟 d3 forceCollide 的 padding：每节点外扩该值，静止间距 = r_i+r_j+2·pad。
+      //   这是「节点之间永远有可见空隙」的来源 —— 没有 padding 时斥力/弹簧/重力
+      //   的压力会把节点一路压到【接触距离】才停（实测最近邻 p10 = 13.6 ≈
+      //   两片叶子半径之和 6.8+6.8），表现就是整团挤成一坨。
+      //   探针实测：pad 6 → CV 0.549、间距 25.6/26.3/41.6（p10/p50/p90）。
+      collidePad: 6,
       skipIsolatedCharge: true,
-      gravity: 3,             // 向心恒力
+      // 🌟 2（原 3）：向心压缩减 1/3。gravity 是唯一把图谱往一起收的力，
+      //   减弱它 = 团簇之间松开 = 分布更均匀。
+      gravity: 2,             // 向心恒力
       gravityDeadzone: 40,    // 死区半径
       centerStrength: 0.02,   // 刚性回正
       alphaMin: 0.001,
@@ -50,7 +62,9 @@
       // 🌟 0.32：赋予整个团簇足够的物理动能去吸纳新节点并自然膨胀
       timelinePlay: 0.32,
       dragStart: 0.3,
-      dragRelease: 0.4,
+      // 🌟 0.3（原 0.4）：松手不额外加压 —— d3 拖拽惯例是全程 alphaTarget 0.3、
+      //   松手让它自然衰减。松手瞬间比拖拽时更热只会放大「弹簧把节点拽回去」。
+      dragRelease: 0.3,
       pulse: 0.5,
       fadeStart: 0.2,
       resize: 0.2,
@@ -94,7 +108,16 @@
     // 拖拽
     // =======================================================================
     drag: {
-      snapBackRatio: 0.22,
+      // 🌟 0（原 0.22）：解析沉降目标 = 放下点，不再向抓取点回滑 22%。
+      //   ⚠ 探针实测：即使 snapBack=0，交还给弹簧的节点仍会被邻居拽回 ~60%
+      //     拖距 —— 弹簧回漂只取决于松手瞬间的弹簧拉伸量，跟拖速/悬停无关。
+      //     所以「停在放下点」由 stickOnRelease 保证，这个参数只影响
+      //     stickOnRelease 关闭时的松手目标。
+      snapBackRatio: 0,
+      // 🌟 Obsidian 式拖拽：松手后节点【钉在放下点】（保持 PIN_HARD），邻域围着
+      //   它重排 —— 弹簧回漂被彻底消除。右键节点可解除固定（放回物理）。
+      //   关掉 = 旧行为（松手后由模拟接管，可能被弹簧拉回）。
+      stickOnRelease: true,
       // 🌟 保留你测试最舒适的果冻手感参数
       elasticStiffness: 3.5,
       jellyDamping: 0.65,
@@ -150,11 +173,14 @@
       edgeWidthBase: 0.7,
       edgeWidthSlope: 0.4,
 
-      labelShowScaleRatio: 0.60,
-      labelHideScaleRatio: 0.50,
-      labelFallbackShow: 0.30,
-      labelFallbackHide: 0.24,
-      labelMaxChars: 24,
+      // 🌟 Obsidian 行为：名字在几乎所有缩放级别都显示（只在互相重叠时让位），
+      // 所以显示阈值压得很低（fitK 的 35%）。
+      labelShowScaleRatio: 0.35,
+      labelHideScaleRatio: 0.28,
+      labelFallbackShow: 0.20,
+      labelFallbackHide: 0.16,
+      // 🌟 Obsidian 从不截断名字。0 = 不截断；设成正数则超过该字数加「…」。
+      labelMaxChars: 0,
       labelFont: '12px ui-sans-serif, -apple-system, "Segoe UI", sans-serif',
       labelColor: '#d9e2f0',
       labelColorDim: 'rgba(217,226,240,0.45)',
@@ -162,14 +188,19 @@
       labelHaloColor: 'rgba(8,10,14,0.7)',
       labelHaloWidth: 1.5,
       labelAlpha: 0.8,
-      labelMaxRatio: 0.3,
+      // 🌟 日记节点默认【不显示名字标签】—— 日期圆点安静地待在图上（Obsidian 式）。
+      // 节点本身仍在图上、仍参与力场；悬浮时邻域标签不受此开关影响
+      // （想看某颗绿点是哪天，hover 一下就行）。
+      labelJournal: false,
+      // 🌟 Obsidian：所有节点都是名字候选（1.0），密集处的取舍完全交给
+      // 占位让位（重叠的藏起来），而不是按度数砍掉 70%。
+      labelMaxRatio: 1.0,
       // 占位格边长（CSS px）。占位按标签的【整个包围盒】标记，不再只标落点一格，
       // 所以这个值只决定重叠判定的精细度：调小 = 判定更严、留下的标签更少。
       labelCell: 14,
-      // 标签精灵缓存上限。⚠ 必须【大于最高的 labelCap】（L0 = 240），否则单帧
-      // 就要建比上限更多的精灵，缓存会退化成每帧重建。512 约合两屏的标签量，
-      // 内存量级 ~10-25MB（每张精灵 ≈ 宽×(字号×1.3+2×pad)×dpr²×4 字节）。
-      labelCacheMax: 512,
+      // 标签精灵缓存上限。⚠ 必须【大于最高的 labelCap】（L0 = 800），否则单帧
+      // 就要建比上限更多的精灵，缓存会退化成每帧重建。
+      labelCacheMax: 1000,
 
       hoverScale: 1.35,
       selectionRingOffset: 2.5,
@@ -189,15 +220,21 @@
     lod: {
       auto: true,
       levels: [
-        { maxN: 800,  glow: 'all',      glowMinScale: 0,    labelCap: 240, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
-        { maxN: 2200, glow: 'deg2',     glowMinScale: 0,    labelCap: 160, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
+        // 🌟 labelCap 大幅放宽（240→800 等）：Obsidian 的做法是【所有节点】都
+        //   有名字，密集处靠重叠让位自动取舍 —— cap 只是防极端帧的首帧建精灵
+        //   爆炸（800 张 ≈ 80ms 一次性成本），不是常规取舍手段。
+        { maxN: 800,  glow: 'all',      glowMinScale: 0,    labelCap: 800, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
+        { maxN: 2200, glow: 'deg2',     glowMinScale: 0,    labelCap: 600, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
         // ⚠ 降档链必须【单调变便宜】。L2 原来写的是 glow:'all'，而 L1 是 'deg2' ——
         //   于是从 L1 降到 L2、且相机缩放 k ≥ glowMinScale 时，反而给全部叶子
         //   节点补上了辉光：在"因为太慢所以降档"的那一刻增加了绘制量。
         //   glow 是纯 fill-rate 开销（半尺寸 spread×rScreen 的 alpha 混合大位图），
         //   是这个渲染器最贵的一项，绝不能反向。
-        { maxN: 5000, glow: 'deg2',     glowMinScale: 0.5,  labelCap: 90,  collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 1, pulses: true },
-        { maxN: Infinity, glow: 'hover', glowMinScale: 1,   labelCap: 40,  collideIter: 0, skipIsolatedCharge: true,  chargeEveryNth: 2, pulses: false },
+        { maxN: 5000, glow: 'deg2',     glowMinScale: 0.5,  labelCap: 400, collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 1, pulses: true },
+        // 🌟 L3 collideIter 0→1：碰撞参与「均匀分布」（配合 collidePad 保持间距），
+        //   且它是位置修正不是力，只在醒着时跑，沉降后零成本。降档链仍单调变便宜：
+        //   L3 相比 L2 还有 chargeEveryNth:2 / glow:'hover' / pulses:false / labelCap 200。
+        { maxN: Infinity, glow: 'hover', glowMinScale: 1,   labelCap: 200, collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 2, pulses: false },
       ],
       sampleFrames: 30,
       downshiftMs: 15,
@@ -226,7 +263,7 @@
     // 数据层
     // =======================================================================
     data: {
-      // 🌟 系统节点是否删去（默认 false：不删，保留在图谱中）
+      // 🌟 系统节点是否删去
       hideSystemJournal: false,
       hideSystemPages: false,
 
@@ -239,7 +276,7 @@
         'logseq.class/Template',
       ],
       hideNames: [
-        'Alias', 'Bidirectional property title', 'Contents', 'Due',
+        'card','Property','Comment','Card','Cards','Alias', 'Bidirectional property title', 'Contents', 'Due',
         'Enable bidirectional properties', 'Extends', 'External URL',
         'Hide from Node', 'Library', 'Published URL',
         'Repeating recur frequency', 'Repeating recur unit', 'Repeating type',
@@ -313,8 +350,8 @@
       key: 'charge',
       type: 'number',
       title: '⚡ 斥力强度 / Repulsion',
-      description: '节点之间的排斥力，决定整体疏密。(default -0.10)',
-      default: -0.10,
+      description: '节点之间的排斥力，决定整体疏密。(default -0.12)',
+      default: -0.12,
     },
     {
       key: 'linkDistance',
@@ -383,8 +420,25 @@
       key: 'labelMaxRatio',
       type: 'number',
       title: '🏷 标签密度 / Label Density',
-      description: '常态下最多给多少比例的节点显示名字。(default 0.3)',
-      default: 0.3,
+      description: '多少比例的节点有资格显示名字（1 = 全部，密集处自动让位）。(default 1)',
+      default: 1,
+    },
+    {
+      key: 'labelJournal',
+      type: 'boolean',
+      title: '📅 显示日记名字 / Journal Labels',
+      description: '日记节点旁是否显示名字标签（默认关：日记只显示圆点，悬浮时仍可见）。\nShow name labels on journal nodes? (default false: dots only, hover to see names)',
+      default: false,
+    },
+    {
+      key: 'stickOnRelease',
+      type: 'boolean',
+      title: '📌 拖后固定 / Stick On Drop',
+      description:
+        '松手后节点钉在放下点、邻域围着它重排（Obsidian 式拖拽手感）。\n' +
+        '右键节点 = 解除固定 / 固定。开启时松手甩掷不生效。\n' +
+        'Pin a node where you drop it? Right-click a node to unpin/pin. (default on)',
+      default: true,
     },
     {
       key: 'nodeSize',
@@ -410,6 +464,8 @@
     shockMagnitude: () => GFI.configDefaults.shock.magnitude,
     timelapseDuration: () => GFI.configDefaults.timeline.baseDurationSec,
     labelMaxRatio: () => GFI.configDefaults.render.labelMaxRatio,
+    labelJournal: () => GFI.configDefaults.render.labelJournal,
+    stickOnRelease: () => GFI.configDefaults.drag.stickOnRelease,
     nodeSize: () => GFI.configDefaults.render.nodeSize,
     hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
     hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
@@ -420,11 +476,11 @@
     if (bind) item.default = bind();
   }
 
-  // 🌟 12：升级为 Obsidian 黄金比例配置（节点尺寸/辉光桶位/连线透明度/线长45）。
+  // 🌟 14：日记标签默认关闭（labelJournal = false）。
   // ⚠ 提升版本号的【代价】是 fresh 分支会把所有面板设置重置成 configDefaults，
   //   然后写回 Logseq —— 这是设计用途（换一套新默认值），不是 bug。
   //   受影响最大的是 hideNames 那个自定义过滤文本框（它只在面板里，config 里没有）。
-  GFI.CFG_VERSION = 12;
+  GFI.CFG_VERSION = 14;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -479,6 +535,11 @@
     c.shock.magnitude = pick('shockMagnitude', d.shock.magnitude);
     c.timeline.baseDurationSec = pick('timelapseDuration', d.timeline.baseDurationSec);
     c.render.labelMaxRatio = pick('labelMaxRatio', d.render.labelMaxRatio);
+    c.render.labelJournal = fresh ? d.render.labelJournal : !!s.labelJournal;
+    // 布尔默认 true 时不能照抄 !!s.xxx（undefined 会翻转成 false），必须判 undefined
+    c.drag.stickOnRelease = fresh
+      ? d.drag.stickOnRelease
+      : (s.stickOnRelease === undefined ? d.drag.stickOnRelease : !!s.stickOnRelease);
     c.render.nodeSize = pick('nodeSize', d.render.nodeSize);
 
     // -----------------------------------------------------------------------
@@ -539,6 +600,8 @@
           shockMagnitude: c.shock.magnitude,
           timelapseDuration: c.timeline.baseDurationSec,
           labelMaxRatio: c.render.labelMaxRatio,
+          labelJournal: c.render.labelJournal,
+          stickOnRelease: c.drag.stickOnRelease,
           nodeSize: c.render.nodeSize,
           hideSystemJournal: c.data.hideSystemJournal,
           hideSystemPages: c.data.hideSystemPages,
