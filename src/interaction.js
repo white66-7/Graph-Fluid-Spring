@@ -7,54 +7,29 @@
  *
  * 命中测试复用物理的均匀网格：模拟醒着时每 tick 重建，睡着时【沿用上一次的】——
  * 纯相机操作期间没有任何东西移动，那张旧网格恰好是精确的，所以平移缩放零成本。
+ *
+ * 拖拽 = d3-drag 的语义（dragstart 抬 alphaTarget / drag 写 fx,fy / dragend 归零），
+ * 外加两个白盒实测出来的补丁（依据见 test/drag-probe.js）：
+ *   · 拖动期间 sim.setDragLinkBoost(i, cfg.drag.linkBoost)
+ *     —— 只给被拖节点的关联边加刚度，让邻居跟着走，图不被扯裂
+ *   · 松手时把 alpha 压到 cfg.drag.releaseAlpha
+ *     —— 回弹幅度几乎正比于松手后的 alpha，压低它节点才停得住
+ * 旧的两版（松手钉死 / 解析解沉降 + 甩掷）已删除：实测两版都更差，见 config.js drag 段。
  */
 (function (GFI) {
   'use strict';
   if (GFI.Interaction) return;
 
-  const { clamp } = GFI.util;
-
-  const TRAIL_K = 16;          // 速度采样环形缓冲容量
   const HIT_BUF = 64;          // 命中候选上限
 
   /**
    * @param {HTMLCanvasElement} canvas
    * @param {object} hooks { onNodeActivate(node), onHoverChange(i), onSelectionChange(i), onWake() }
    */
-  function create(canvas, D, cam, sim, fx, hooks) {
+  function create(canvas, D, cam, sim, hooks) {
     const cfg = GFI.config;
     const reg = GFI.util.createListenerRegistry();
     hooks = hooks || {};
-
-    // ---- 速度采样环形缓冲（预分配，不用 push/shift 分配）----
-    const trailX = new Float64Array(TRAIL_K);
-    const trailY = new Float64Array(TRAIL_K);
-    const trailT = new Float64Array(TRAIL_K);
-    let trailHead = 0, trailLen = 0;
-
-    function trailPush(x, y, t) {
-      if (trailLen < TRAIL_K) {
-        const idx = (trailHead + trailLen) % TRAIL_K;
-        trailX[idx] = x; trailY[idx] = y; trailT[idx] = t;
-        trailLen++;
-      } else {
-        trailX[trailHead] = x; trailY[trailHead] = y; trailT[trailHead] = t;
-        trailHead = (trailHead + 1) % TRAIL_K;
-      }
-    }
-
-    function trailPrune(now) {
-      const win = cfg.drag.sampleWindow;
-      while (trailLen > 1 && now - trailT[trailHead] > win) {
-        trailHead = (trailHead + 1) % TRAIL_K;
-        trailLen--;
-      }
-    }
-
-    function trailReset(x, y, t) {
-      trailHead = 0; trailLen = 0;
-      trailPush(x, y, t);
-    }
 
     // ---- 命中测试缓冲 ----
     const hitBuf = new Int32Array(HIT_BUF);
@@ -68,10 +43,7 @@
       panning: false,
       moved: false,
       downX: 0, downY: 0, downT: 0,
-      grabNodeX: 0, grabNodeY: 0,     // 世界坐标
       offX: 0, offY: 0,               // 抓取时节点相对指针的偏移（世界坐标）
-      downWorldX: 0, downWorldY: 0,
-      activePointer: -1,
       // 用户是否自己操作过相机（平移/缩放/拖节点）。
       // 用于让自动适配视野让位 —— 不能跟人抢镜头。
       // 注意不能靠 onWake 来设置：平移【刻意不唤醒模拟】（否则每拖一下相机
@@ -179,7 +151,6 @@
 
       const [sx, sy] = localPoint(e);
       state.interacted = true;
-      state.activePointer = e.pointerId;
       state.downX = sx; state.downY = sy;
       state.downT = GFI.util.now();
       state.moved = false;
@@ -192,11 +163,9 @@
       if (hit >= 0) {
         const wx = cam.screenToWorldX(sx);
         const wy = cam.screenToWorldY(sy);
-        state.grabNodeX = D.x[hit];
-        state.grabNodeY = D.y[hit];
+        // 抓取偏移：节点中心不跳到指针上，保持你按下时的相对位置（不"跳手"）
         state.offX = wx - D.x[hit];
         state.offY = wy - D.y[hit];
-        state.downWorldX = wx; state.downWorldY = wy;
 
         // 抓起：硬 pin + 抬高 alpha 目标，让邻域活起来。
         //
@@ -213,8 +182,11 @@
         //   图谱会先抖 / 重排一下再跳转 —— 看起来就是"点一下会跳"。
         //   重热推迟到 onPointerMove 里首次越过 minDragDist 的那一刻。
         if (D.deg[hit] > 0) sim.setAlphaTarget(cfg.reheat.dragStart);
+        // ⚠ 局部弹簧增益【不在这里挂】—— 与 reheat 同理：此刻还分不清"点一下"和
+        //   "抓起来拖"。实测（test/drag-jitter-probe.js）在 pointerdown 就挂上，
+        //   指针【还没动】邻居峰速就从 1.7 涨到 4.0 wu/tick —— 一按就抖。
+        //   推迟到 onPointerMove 首次越过 minDragDist 的那一刻。
         state.dragNode = hit;
-        trailReset(sx, sy, state.downT);
         wake();
       } else {
         cam.beginPan(sx, sy);
@@ -249,19 +221,6 @@
       const [sx, sy] = localPoint(e);
 
       if (state.dragNode >= 0) {
-        // 用合并事件按真实输入率采样，而不是 rAF 率 —— 明显的甩掷手感提升
-        const now = GFI.util.now();
-        const events = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
-        if (events && events.length) {
-          const r = canvas.getBoundingClientRect();
-          for (let i = 0; i < events.length; i++) {
-            trailPush(events[i].clientX - r.left, events[i].clientY - r.top, now);
-          }
-        } else {
-          trailPush(sx, sy, now);
-        }
-        trailPrune(now);
-
         const wx = cam.screenToWorldX(sx);
         const wy = cam.screenToWorldY(sy);
         const nx = wx - state.offX;
@@ -276,7 +235,13 @@
           //   但正因为它是瞬时的，就只能在"确定是拖拽"之后调：放在 pointerdown
           //   会让普通点击也重热整张图，图谱先抖一下再跳转。
           //   0.0 的悬停不算 —— 只有真的动了 minDragDist 才重热。
-          if (D.deg[state.dragNode] > 0) sim.reheat(cfg.reheat.dragStart);
+          //
+          //   同一条理由也适用于局部弹簧增益：它同样是"确定是拖拽了"才挂。
+          if (D.deg[state.dragNode] > 0) {
+            sim.reheat(cfg.reheat.dragStart);
+            // 只增益【被拖节点自己的】关联边，让邻居跟着走（见 physics.js forceLink）
+            sim.setDragLinkBoost(state.dragNode, cfg.drag.linkBoost);
+          }
         }
 
         sim.pin(state.dragNode, nx, ny);
@@ -313,6 +278,7 @@
         const dt = now - state.downT;
         state.dragNode = -1;
         sim.setAlphaTarget(0);
+        sim.setDragLinkBoost(-1, 1);
 
         const isClick = !moved && dt < cfg.drag.clickMaxMs && state.downNode === i;
         if (isClick) {
@@ -323,65 +289,22 @@
           return;
         }
 
-        // ---- 🌟 Obsidian 式松手：钉在放下点，邻域围着它重排 ----
-        // 探针实测（test/uniformity-probe.js）：只要松手后把节点交还给模拟，
-        // 弹簧就会把它往邻居方向拽回 ~60% 拖距 —— 回漂量只取决于松手瞬间
-        // 弹簧的拉伸量，跟拖得多慢、悬停多久都无关。所以「停在放下点」只能
-        // 靠保持 PIN_HARD 实现：applyPins 每 tick 钉死坐标，所有力都跳过它，
-        // 而邻居照常受力 → 围绕新锚点重新排布（正是 Obsidian 的观感）。
-        // 解除固定：右键节点（见下方 onContextMenu）。
-        if (cfg.drag.stickOnRelease) {
-          // 节点此刻仍处于 pointerdown 时的 pin，坐标 = 最后一次 pin 的放下点，
-          // 什么都不用写 —— 只需重热让邻域动起来。
-          if (D.deg[i] > 0) sim.reheat(cfg.reheat.dragRelease);
-          wake();
-          return;
-        }
-
-        // ---- 松手：解析解沉降 + 加权混合交接 ----
-        trailPush(sx, sy, now);
-        trailPrune(now);
-
-        let vxScreen = 0, vyScreen = 0;
-        if (trailLen >= 2) {
-          const first = trailHead;
-          const last = (trailHead + trailLen - 1) % TRAIL_K;
-          const dtx = Math.max(1, trailT[last] - trailT[first]);
-          vxScreen = ((trailX[last] - trailX[first]) / dtx) * 1000;
-          vyScreen = ((trailY[last] - trailY[first]) / dtx) * 1000;
-        }
-        // 速度上限，保持方向
-        const sp = Math.hypot(vxScreen, vyScreen);
-        if (sp > cfg.drag.maxFlingSpeed) {
-          vxScreen = (vxScreen / sp) * cfg.drag.maxFlingSpeed;
-          vyScreen = (vyScreen / sp) * cfg.drag.maxFlingSpeed;
-        }
-
-        const k = Math.max(0.01, cam.k);
-        const vxW = vxScreen / k;
-        const vyW = vyScreen / k;
-
-        const upWorldX = cam.screenToWorldX(sx);
-        const upWorldY = cam.screenToWorldY(sy);
-        const deltaX = upWorldX - state.downWorldX;
-        const deltaY = upWorldY - state.downWorldY;
-
-        const targetX = state.grabNodeX + deltaX * (1 - cfg.drag.snapBackRatio) + (vxW / 60) * cfg.drag.flingMomentum;
-        const targetY = state.grabNodeY + deltaY * (1 - cfg.drag.snapBackRatio) + (vyW / 60) * cfg.drag.flingMomentum;
-
-        const releaseX = state.grabNodeX + deltaX;
-        const releaseY = state.grabNodeY + deltaY;
-
-        // 先解 pin：之后节点由模拟积分，我们只在每帧末尾按权重混合解析解
+        // ---- 松手：交还给物理，但把 alpha 压到低位 ----
+        //
+        // d3-drag 的官方惯例是 dragend 时 alphaTarget(0)、让 alpha 从拖拽期的
+        // 0.3 自然衰减。实测（test/drag-probe.js）那样节点会被连线一路拽回去：
+        // 拖 234wu 回弹 156wu，【轻推 50wu 更是被甩到 112wu —— 冲过原位 60wu】。
+        // 因为回弹幅度几乎正比于松手后的 alpha（弹簧力同样乘 alpha）。
+        // 压到 releaseAlpha 之后：大拖回弹 156→83wu，小拖峰值 112→29wu。
+        //
+        // ⚠ 不能压到 0.02 以下：图会僵住，拖拽期间留下的残余变形收不回来
+        //   （末尾最近邻距离 27 → 43wu）。
+        //
+        // 坐标不用补：sim.pin() 是同步写 x/y 的，而 applyPins 每 tick 还会把被钉
+        // 节点的速度清零 —— 所以下面这两行是显式重申，不依赖那个不变量。
         sim.unpin(i);
-        D.x[i] = releaseX; D.y[i] = releaseY;
-        // vxW 是 wu/s（解析解用的单位）；模拟内部速度是 wu/tick
-        D.vx[i] = vxW * GFI.DT; D.vy[i] = vyW * GFI.DT;
-
-        fx.startSettle(i, releaseX, releaseY, vxW, vyW, targetX, targetY, k);
-        // 同样只对【有邻居】的节点重热 —— 孤立节点甩完就该安安静静停住，
-        // 不该让整张图跟着一起晃。
-        if (D.deg[i] > 0) sim.reheat(cfg.reheat.dragRelease);
+        D.vx[i] = 0; D.vy[i] = 0;
+        if (D.deg[i] > 0 && sim.alpha > cfg.drag.releaseAlpha) sim.alpha = cfg.drag.releaseAlpha;
         wake();
         return;
       }
@@ -406,7 +329,6 @@
       state.pointers.delete(e.pointerId);
       cancelDrag();
       if (state.panning) { state.panning = false; cam.endPan(); }
-      state.activePointer = -1;
     }
 
     function onPointerLeave() {
@@ -418,12 +340,15 @@
         sim.unpin(state.dragNode);
         state.dragNode = -1;
       }
+      sim.setDragLinkBoost(-1, 1);
       sim.setAlphaTarget(0);
-      fx.cancelSettle();
     }
 
     // -----------------------------------------------------------------------
-    // 右键 = 固定 / 解除固定（stickOnRelease 的解除通道）
+    // 右键 = 固定 / 解除固定
+    // 拖拽本身【不再】钉住节点（松手就交还物理，见 onPointerUp）；这里是独立的手动
+    // 锚定：把某个节点钉死在当前位置不参与布局，用来固定你手动摆好的结构。
+    // 解除时会重热一下，让它漂回自己的弹簧平衡位。
     // pointerdown 对 mouse 的 button!==0 已早退，右键不会触发平移/抓取。
     // -----------------------------------------------------------------------
     function onContextMenu(e) {
@@ -468,7 +393,7 @@
     function onKeyDown(e) {
       if (typingInHost()) return;
       if (e.key === 'Escape') {
-        if (state.dragNode >= 0 || fx.settleActive) { cancelDrag(); wake(); }
+        if (state.dragNode >= 0) { cancelDrag(); wake(); }
         else inter.setSelected(-1);
       }
     }

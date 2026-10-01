@@ -25,8 +25,10 @@
       distanceMin: 16,        // 软化近距奇点（配合增大后的节点半径）
       distanceMax: 420,       // 斥力截断半径
       // 🌟 Obsidian 黄金比例连线距离：相连节点间距约 30~34 屏幕像素。
-      // 名字画在节点右侧后，水平方向要多留出标签的空间，所以比纯节点比例
-      // 略大一档（45 → 50）。
+      // 原来比纯节点比例大了一档（45 → 50），理由是"名字画在节点右侧、水平方向
+      // 要多留标签空间"。⚠ 标签现已改到节点【正下方】（见 renderer.drawOne），
+      // 那条理由不再成立 —— 但数值没动：改它会直接改变整套观感，要动请先在
+      // test/label-occlusion-probe.js 与 uniformity-probe.js 上量一遍。
       linkDistance: 50,
       linkStrength: 0.3,      // 边刚度
       velocityRetain: 0.80,   // 每帧速度保留率
@@ -108,26 +110,34 @@
     // 拖拽
     // =======================================================================
     drag: {
-      // 🌟 0（原 0.22）：解析沉降目标 = 放下点，不再向抓取点回滑 22%。
-      //   ⚠ 探针实测：即使 snapBack=0，交还给弹簧的节点仍会被邻居拽回 ~60%
-      //     拖距 —— 弹簧回漂只取决于松手瞬间的弹簧拉伸量，跟拖速/悬停无关。
-      //     所以「停在放下点」由 stickOnRelease 保证，这个参数只影响
-      //     stickOnRelease 关闭时的松手目标。
-      snapBackRatio: 0,
-      // 🌟 Obsidian 式拖拽：松手后节点【钉在放下点】（保持 PIN_HARD），邻域围着
-      //   它重排 —— 弹簧回漂被彻底消除。右键节点可解除固定（放回物理）。
-      //   关掉 = 旧行为（松手后由模拟接管，可能被弹簧拉回）。
-      stickOnRelease: true,
-      // 🌟 保留你测试最舒适的果冻手感参数
-      elasticStiffness: 3.5,
-      jellyDamping: 0.65,
-      flingMomentum: 1.4,
+      // 🌟 拖动期间给【被拖节点关联的边】临时加刚度 —— 邻居跟着走，图不被扯裂。
+      //
+      //   lstr[e] = clamp(linkStrength / minDeg, 0.02, 0.5)，边刚度按两端较【低】
+      //   度数衰减；被拖的恰恰就是这个低度数叶子，它连到 hub 的边只有 0.3/3 = 0.1，
+      //   再乘 alpha 0.3 → 邻居每 tick 只拿到约 0.7wu 加速度。
+      //   实测（test/drag-probe.js，拖 234wu）：邻居只跟出 91wu，关联边被拉伸到
+      //   379%，松手瞬间被拖节点离最近邻居 142wu（基线 26.4、平衡边长 50）。
+      //   加 ×16 → 撕裂 379%→187%，小拖甩飞峰值 112→27wu。
+      //   ⚠ 上限 24：实测 2~3 跳增益更差（局部硬斑对抗全局布局，全局撕裂
+      //     63%→110%），hop3×40 会让坐标发散到无穷、网格分配直接 OOM。
+      linkBoost: 16,
+      // 🌟 被拖节点【直接邻居】的额外速度阻尼（velocityRetain 的覆盖值）。
+      //
+      //   刚度倍率只放大弹簧力、不放大阻尼，所以必须配套补阻尼，否则进深欠阻尼区：
+      //   离散步进 trace = 1 + D(1−k)、det = D，k = a·lstr·be·biasT。
+      //   拖 hub 时邻居是叶子（lstr = clamp(0.3/1,…) = 0.3）且 biasT = 56/57 ≈ 0.98，
+      //   k = 0.3×0.3×16×0.98 ≈ 1.41 → 振荡周期 ≈ 5.3 帧（11Hz）、每周期只衰减 15%
+      //   —— 肉眼就是「大节点周围在抽搐」。实测（test/drag-jitter-probe.js）：
+      //   be=16 时邻居位移折返率 21.9%，be=1 时 0.1%。
+      //   临界阻尼条件 (1 + D(1−k))² = 4D → k=1.41 时 D ≈ 0.21。
+      //   ⚠ 只在拖拽期间、只作用于被拖节点的一环，不影响图的其他部分。
+      linkBoostDamp: 0.22,
+      // 🌟 松手时把 alpha 压到这个水平（而不是停在拖拽期的 0.3）。
+      //   这是「停在放下点」的关键：回弹幅度几乎正比于松手后的 alpha。
+      //   实测大拖回弹 156（alpha .30）→ 94（.08）→ 83（.05）；小拖峰值 112 → 29。
+      //   ⚠ 不能压到 0.02：图会僵住，残余变形收不回来（末尾邻距 27 → 43）。
+      releaseAlpha: 0.05,
       minDragDist: 5.0,
-      sampleWindow: 60,
-      maxFlingSpeed: 1800,
-      handoffTail: 0.45,
-      handoffMinTime: 0.2,
-      maxSettleTime: 1.5,
       clickMaxMs: 600,
     },
 
@@ -179,6 +189,28 @@
       labelHideScaleRatio: 0.28,
       labelFallbackShow: 0.20,
       labelFallbackHide: 0.16,
+      // 🌟 标签重叠让位。【false = Obsidian 的真实做法】。
+      //
+      //   查证：Obsidian 官方论坛 Bug graveyard 帖「Graph view - titles overlap」
+      //   （2022-10 归档 = 不会修）里，开发者 Silver 的原话是「我们没有任何计划
+      //   修复这个，因为对文字标签做碰撞检测在技术上并不简单。想读文字就放大；
+      //   只想看节点位置就缩小，文字会消失」。
+      //   其物理引擎（d3-force 复刻）的 forceCollide 也只按【节点半径】算，标签
+      //   完全不参与布局 —— 所以 Obsidian 的取舍手段【只有】按缩放的文字淡变。
+      //
+      //   true  = 重叠的标签互相让位（本插件早先的做法）。实测代价：视口内 299 个
+      //           节点只有 52 个拿到名字，而让位只压掉 7 个、其余是真的放不下 ——
+      //           即「很多节点没名字」是这套机制的必然结果，不是 bug。
+      //   false = 每个节点都画名字、允许重叠，密度完全交给缩放门槛（见
+      //           labelShowScaleRatio / labelHideScaleRatio）—— 与 Obsidian 一致。
+      labelYield: false,
+      // 🌟 与已画出的标签重叠时，alpha 压到这个倍率（不是藏起来）。
+      //
+      //   实机截图反馈「标签重叠易混淆」—— 全是同亮度的字叠在一起没法看。
+      //   让位（藏起来）会丢名字，全画（等亮度）会糊，这是中间档：
+      //   先画的高名次节点（hub）保持清晰，被压住的退到背景，名字一个不少。
+      //   0 = 完全不画重叠的（等价于让位）；1 = 不做任何区分（全都同亮）。
+      labelOverlapDim: 0.35,
       // 🌟 Obsidian 从不截断名字。0 = 不截断；设成正数则超过该字数加「…」。
       labelMaxChars: 0,
       labelFont: '12px ui-sans-serif, -apple-system, "Segoe UI", sans-serif',
@@ -375,18 +407,23 @@
       default: 400,
     },
     {
-      key: 'flingMomentum',
+      key: 'linkBoost',
       type: 'number',
-      title: '🎯 甩掷惯性 / Fling Momentum',
-      description: '快速甩出节点时的惯性倍率。(default 1.4)',
-      default: 1.4,
+      title: '🧲 拖动带动邻域 / Neighbour Pull',
+      description:
+        '拖动节点时邻居跟随的力度。只作用于被拖节点自己的连线，图的其他部分不受影响。\n' +
+        '调高 = 邻域跟得更紧、图不易被扯变形；调低 = 邻居基本不动。\n' +
+        '实测 16 最优；超过 24 有让布局发散的风险。(default 16)',
+      default: 16,
     },
     {
-      key: 'jellyDamping',
+      key: 'releaseAlpha',
       type: 'number',
-      title: '🍮 松手回弹 / Release Damping',
-      description: '拖动后松手时的阻尼。数值越低回弹越明显。(default 0.65)',
-      default: 0.65,
+      title: '🪂 松手停位 / Drop Firmness',
+      description:
+        '松手后布局的活跃度。数值越低，节点越能停在你放下的地方；\n' +
+        '越高则越会被连线拉回原来的位置。实测 0.05 最优，低于 0.02 图会僵住收不回来。(default 0.05)',
+      default: 0.05,
     },
     {
       key: 'popAmp',
@@ -431,14 +468,16 @@
       default: false,
     },
     {
-      key: 'stickOnRelease',
+      key: 'labelYield',
       type: 'boolean',
-      title: '📌 拖后固定 / Stick On Drop',
+      title: '🈳 标签重叠时让位 / Hide Overlapping Labels',
       description:
-        '松手后节点钉在放下点、邻域围着它重排（Obsidian 式拖拽手感）。\n' +
-        '右键节点 = 解除固定 / 固定。开启时松手甩掷不生效。\n' +
-        'Pin a node where you drop it? Right-click a node to unpin/pin. (default on)',
-      default: true,
+        '关闭（默认，与 Obsidian 一致）= 每个节点都显示名字，允许互相重叠；\n' +
+        '密集处靠「放大才显示」控制，也就是缩小后文字自然消失。\n' +
+        '开启 = 重叠的标签互相让位，同一块地方只留最重要的那个 —— \n' +
+        '画面更干净，但会有很多节点永远看不到名字。\n' +
+        'Hide overlapping labels? Off = Obsidian behaviour (all names shown, may overlap).',
+      default: false,
     },
     {
       key: 'nodeSize',
@@ -459,13 +498,13 @@
     settleTicks: () => GFI.configDefaults.physics.settleTicks,
     popAmp: () => GFI.configDefaults.pop.amp,
     popZeta: () => GFI.configDefaults.pop.zeta,
-    jellyDamping: () => GFI.configDefaults.drag.jellyDamping,
-    flingMomentum: () => GFI.configDefaults.drag.flingMomentum,
+    linkBoost: () => GFI.configDefaults.drag.linkBoost,
+    releaseAlpha: () => GFI.configDefaults.drag.releaseAlpha,
     shockMagnitude: () => GFI.configDefaults.shock.magnitude,
     timelapseDuration: () => GFI.configDefaults.timeline.baseDurationSec,
     labelMaxRatio: () => GFI.configDefaults.render.labelMaxRatio,
     labelJournal: () => GFI.configDefaults.render.labelJournal,
-    stickOnRelease: () => GFI.configDefaults.drag.stickOnRelease,
+    labelYield: () => GFI.configDefaults.render.labelYield,
     nodeSize: () => GFI.configDefaults.render.nodeSize,
     hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
     hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
@@ -489,8 +528,9 @@
     settleTicks: (v) => v >= 50 && v <= 5000,
     popAmp: (v) => v >= 0 && v <= 2,
     popZeta: (v) => v > 0.05 && v < 1,
-    jellyDamping: (v) => v > 0.05 && v < 1,
-    flingMomentum: (v) => v >= 0 && v <= 5,
+    linkBoost: (v) => v >= 1 && v <= 24,
+    linkBoostDamp: (v) => v > 0.05 && v < 1,
+    releaseAlpha: (v) => v >= 0.02 && v <= 1,
     shockMagnitude: (v) => v >= 0 && v <= 2000,
     timelapseDuration: (v) => v >= 2 && v <= 300,
     labelMaxRatio: (v) => v > 0 && v <= 1,
@@ -529,17 +569,16 @@
     c.pop.amp = pick('popAmp', d.pop.amp);
     c.pop.zeta = pick('popZeta', d.pop.zeta);
 
-    c.drag.jellyDamping = pick('jellyDamping', d.drag.jellyDamping);
-    c.drag.flingMomentum = pick('flingMomentum', d.drag.flingMomentum);
+    c.drag.linkBoost = pick('linkBoost', d.drag.linkBoost);
+    c.drag.releaseAlpha = pick('releaseAlpha', d.drag.releaseAlpha);
 
     c.shock.magnitude = pick('shockMagnitude', d.shock.magnitude);
     c.timeline.baseDurationSec = pick('timelapseDuration', d.timeline.baseDurationSec);
     c.render.labelMaxRatio = pick('labelMaxRatio', d.render.labelMaxRatio);
     c.render.labelJournal = fresh ? d.render.labelJournal : !!s.labelJournal;
-    // 布尔默认 true 时不能照抄 !!s.xxx（undefined 会翻转成 false），必须判 undefined
-    c.drag.stickOnRelease = fresh
-      ? d.drag.stickOnRelease
-      : (s.stickOnRelease === undefined ? d.drag.stickOnRelease : !!s.stickOnRelease);
+    // 布尔默认 false 时不能照抄 !!s.xxx —— 这里默认就是 false，所以「缺省 = 关」
+    // 与「用户显式关掉」是同一个值，直接 !!s 即可，不会翻转语义。
+    c.render.labelYield = fresh ? d.render.labelYield : !!s.labelYield;
     c.render.nodeSize = pick('nodeSize', d.render.nodeSize);
 
     // -----------------------------------------------------------------------
@@ -595,13 +634,13 @@
           settleTicks: c.physics.settleTicks,
           popAmp: c.pop.amp,
           popZeta: c.pop.zeta,
-          jellyDamping: c.drag.jellyDamping,
-          flingMomentum: c.drag.flingMomentum,
+          linkBoost: c.drag.linkBoost,
+          releaseAlpha: c.drag.releaseAlpha,
           shockMagnitude: c.shock.magnitude,
           timelapseDuration: c.timeline.baseDurationSec,
           labelMaxRatio: c.render.labelMaxRatio,
           labelJournal: c.render.labelJournal,
-          stickOnRelease: c.drag.stickOnRelease,
+          labelYield: c.render.labelYield,
           nodeSize: c.render.nodeSize,
           hideSystemJournal: c.data.hideSystemJournal,
           hideSystemPages: c.data.hideSystemPages,

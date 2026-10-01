@@ -335,32 +335,133 @@ section('6. 时间轴过滤');
 })();
 
 // ===========================================================================
-section('7. 拖拽沉降 — 加权混合交接');
+section('7. 拖拽 —— 局部弹簧增益让邻居跟随（setDragLinkBoost）');
 // ===========================================================================
-(function testSettle() {
-  const D5 = GFI.Data.build(GFI.DataSource.demo(120, { seed: 3 }).nodes,
-    GFI.DataSource.demo(120, { seed: 3 }).links, null);
-  const sim5 = GFI.Physics.create(D5, GFI.config.physics);
-  const fx5 = GFI.Effects.create(D5, sim5);
-  const i = 3;
-  for (let k = 0; k < 60; k++) sim5.tick(DT);
+// 守的是 physics.js forceLink 里的 dragBoost：
+//   lstr[e] = clamp(linkStrength / minDeg, 0.02, 0.5)，边刚度按两端较【低】度数
+//   衰减，而被拖的恰恰是这个低度数节点 —— 不增益时邻居几乎不动，关联边被拉到
+//   好几倍长（实测 test/drag-probe.js：拖 234wu 时撕裂 379%、松手瞬间被拖节点
+//   离最近邻居 142wu，而基线只有 26.4、平衡边长 50）。
+//
+// ⚠ 断言全部用【相对量】：绝对数值随 linkDistance / nodeSize 等面板参数漂移，
+//   钉死在具体数字上的话，用户调一下外观这些用例就会变红（踩过这个坑）。
+(function testDragNeighbourFollow() {
+  const build = () => {
+    const demo = GFI.DataSource.demo(120, { seed: 3 });
+    const D = GFI.Data.build(demo.nodes, demo.links, null);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    sim.lod = 0;
+    for (let k = 0; k < 400; k++) sim.tick(DT);      // 先沉降
+    return { D, sim };
+  };
 
-  const x0 = D5.x[i], y0 = D5.y[i];
-  fx5.startSettle(i, x0 + 300, y0, 900, 0, x0 + 300 * (1 - 0.22) + 15, y0, 1);
-  D5.x[i] = x0 + 300; D5.y[i] = y0;
+  // 复刻 interaction.js 的拖拽：每步 pin + tick（邻居是在帧间被弹簧拉动的，
+  // 只连发 pin 不 tick 等于瞬移，测出来的数据全是假的）
+  const drag = (S, boost) => {
+    const { D, sim } = S;
+    let i = -1;
+    for (let k = 0; k < D.n; k++) if (D.deg[k] >= 2 && D.deg[k] <= 6) { i = k; break; }
+    const hx = D.x[i], hy = D.y[i];
+    const nbrs = [];
+    for (let p = D.adjStart[i]; p < D.adjStart[i + 1]; p++) nbrs.push(D.adjList[p]);
+    const n0 = nbrs.map((j) => [D.x[j], D.y[j]]);
 
-  let maxJump = 0, lastX = D5.x[i], lastY = D5.y[i];
-  for (let k = 0; k < 120; k++) {
-    sim5.tick(DT);
-    fx5.applyHandoff(DT);
-    const jump = Math.hypot(D5.x[i] - lastX, D5.y[i] - lastY);
-    if (jump > maxJump) maxJump = jump;
-    lastX = D5.x[i]; lastY = D5.y[i];
-    if (!fx5.settleActive) break;
+    const globalTear = () => {
+      let s = 0;
+      for (let e = 0; e < D.m; e++) {
+        const a = D.lsrc[e], b = D.ltgt[e];
+        s += Math.abs(Math.hypot(D.x[b] - D.x[a], D.y[b] - D.y[a]) - D.ldist[e]) / D.ldist[e];
+      }
+      return D.m ? s / D.m : 0;
+    };
+
+    sim.pin(i, hx, hy);
+    sim.setAlphaTarget(GFI.config.reheat.dragStart);
+    if (boost) sim.setDragLinkBoost(i, GFI.config.drag.linkBoost);
+    sim.reheat(GFI.config.reheat.dragStart);
+
+    for (let k = 1; k <= 45; k++) {
+      sim.pin(i, hx + 200 * k / 45, hy + 120 * k / 45);
+      sim.tick(DT);
+    }
+    sim.setDragLinkBoost(-1, 1);
+
+    let gap = Infinity;
+    for (const j of nbrs) {
+      const d = Math.hypot(D.x[j] - D.x[i], D.y[j] - D.y[i]);
+      if (d < gap) gap = d;
+    }
+    let moved = 0;
+    for (let q = 0; q < nbrs.length; q++) {
+      moved += Math.hypot(D.x[nbrs[q]] - n0[q][0], D.y[nbrs[q]] - n0[q][1]);
+    }
+    return { gap, moved: moved / Math.max(1, nbrs.length), tear: globalTear() };
+  };
+
+  const dragDist = Math.hypot(200, 120);
+  const A = drag(build(), false);
+  const B = drag(build(), true);
+
+  // 判据用【相对量】：绝对数值随 linkDistance / nodeSize 等面板参数漂移，
+  // 钉死在具体数字上的话，用户调一下外观这些用例就会变红（踩过这个坑）。
+  check('不增益时邻居跟不上 → 图被扯裂', A.gap > dragDist * 0.3,
+    `最近邻居 ${A.gap.toFixed(0)}wu（拖距 ${dragDist.toFixed(0)}wu）`);
+  check('增益后邻居明显跟得更紧', B.gap < A.gap * 0.85,
+    `${A.gap.toFixed(0)} → ${B.gap.toFixed(0)} wu`);
+  check('增益后邻居位移更大', B.moved > A.moved * 1.15,
+    `${A.moved.toFixed(0)} → ${B.moved.toFixed(0)} wu`);
+  check('增益没有把全局拉得更坏', B.tear <= A.tear * 1.2,
+    `全局平均撕裂 ${(A.tear * 100).toFixed(0)}% → ${(B.tear * 100).toFixed(0)}%`);
+  check('松手后坐标有限', Number.isFinite(B.gap) && Number.isFinite(B.moved));
+
+  // ---- 局域性：增益【只能】改变被拖节点及其一环的受力 ----
+  //
+  // 这是 forceLink 里那个 be 倍率的准确契约，所以用【精确相等】而不是统计量来守：
+  // 两次 build 是确定性的，跑同一 tick 时二环外节点的受力输入（位置）完全相同，
+  // 而力是在 integrate 之前全部累加完的 → 它们的 vx/vy 必须一个 bit 都不差。
+  // （位置不能这么比：forceCenter 会把【所有】节点按质心平移，而质心因为被拖
+  //   那一点的位移略有不同 —— 那是全局平移，不是受力泄漏。）
+  const S1 = build(), S2 = build();
+  const D1 = S1.D, D2 = S2.D;
+  let i1 = -1;
+  for (let k = 0; k < D1.n; k++) if (D1.deg[k] >= 2 && D1.deg[k] <= 6) { i1 = k; break; }
+  const hop1 = new Uint8Array(D1.n);
+  for (let p = D1.adjStart[i1]; p < D1.adjStart[i1 + 1]; p++) hop1[D1.adjList[p]] = 1;
+
+  S2.sim.setDragLinkBoost(i1, GFI.config.drag.linkBoost);
+  S1.sim.tick(DT);
+  S2.sim.tick(DT);
+
+  let maxVelDelta = 0, checked = 0;
+  for (let j = 0; j < D1.n; j++) {
+    if (j === i1 || hop1[j] || D1.deg[j] === 0) continue;
+    const d = Math.abs(D1.vx[j] - D2.vx[j]) + Math.abs(D1.vy[j] - D2.vy[j]);
+    if (d > maxVelDelta) maxVelDelta = d;
+    checked++;
   }
-  check('沉降过程中无位置突变（交接无缝）', maxJump < 40, `最大单帧位移 ${maxJump.toFixed(2)} wu`);
-  check('沉降会自行结束', !fx5.settleActive);
-  check('结束后位置有限', Number.isFinite(D5.x[i]) && Number.isFinite(D5.y[i]));
+  check('增益严格局部：一环之外受力完全相同', maxVelDelta === 0,
+    `最大速度偏差 ${maxVelDelta}（受检 ${checked} 个节点）`);
+
+  // 反面：被拖节点自己必须【真的】被增益影响，否则上面那条会假通过
+  const boostedDelta = Math.abs(D1.vx[i1] - D2.vx[i1]) + Math.abs(D1.vy[i1] - D2.vy[i1]);
+  check('被拖节点自身受力确实变了（防止上一条假通过）', boostedDelta > 0,
+    `速度偏差 ${boostedDelta.toExponential(3)}`);
+
+  // ---- 撤销必须彻底：设了又立刻撤，结果应与从没设过完全一致 ----
+  const S3 = build(), S4 = build();
+  let i4 = -1;
+  for (let k = 0; k < S4.D.n; k++) if (S4.D.deg[k] >= 2 && S4.D.deg[k] <= 6) { i4 = k; break; }
+  S4.sim.setDragLinkBoost(i4, GFI.config.drag.linkBoost);
+  S4.sim.setDragLinkBoost(-1, 1);
+  S3.sim.tick(DT);
+  S4.sim.tick(DT);
+  let undoDelta = 0;
+  for (let j = 0; j < S3.D.n; j++) {
+    const d = Math.abs(S3.D.vx[j] - S4.D.vx[j]) + Math.abs(S3.D.vy[j] - S4.D.vy[j]);
+    if (d > undoDelta) undoDelta = d;
+  }
+  check('setDragLinkBoost(-1, …) 撤销彻底（全表受力一致）', undoDelta === 0,
+    `最大速度偏差 ${undoDelta}`);
 })();
 
 // ===========================================================================
@@ -688,18 +789,18 @@ section('10. 特效空转剪枝 —— 计数器必须精确，隐藏的节点�
 })();
 
 // ===========================================================================
-section('11. 主循环 handoff 门控 —— settle 不许把空闲停机钉死');
+section('11. 拖拽沉睡期写坐标 —— 网格必须跟上，否则节点会被剔除掉');
 // ===========================================================================
-// 复刻 main.js 子步循环里那两行（改动前 / 改动后）：
-//     const awake = sim.isAwake();
-//     if (awake) sim.tick(DT);
-//     fx.update(DT);
-//     if (awake) fx.applyHandoff(DT);     ← 改动前：模拟睡着时解析解永远不推进
-//     fx.applyHandoff(DT);                ← 改动后
-// main.js 需要 DOM、进不了本沙箱，但被门控的 sim / fx 是这里加载的真实代码，
-// 而失败模式完全由这两行决定：settle 非空 ⇒ fx.anyActive() 恒真 ⇒ main.js 的
-// busy 恒真 ⇒ 空闲停机（连续 30 帧无活动就 cancelAnimationFrame）永不触发。
-(function testHandoffGating() {
+// 守的是 main.js 里那一行：
+//     if (!P.sim.isAwake() && P.inter && P.inter.dragNode >= 0) P.sim.rebuildGrid();
+//
+// 拖拽是【唯一】在模拟睡眠状态下直接写节点坐标的路径：sim.pin() 是同步写 x/y 的，
+// 而零度节点刻意不 reheat、也不抬 alphaTarget（见 interaction.js onPointerDown）
+// → 模拟全程睡着 → chargeGrid 不会自己重建。而剔除（renderer.setGrid(sim.grid)）
+// 与命中测试都复用这张网格 —— 不补 rebuildGrid 的话，被拖的节点会以【入睡时的
+// 旧位置】参与剔除，拖出余量后就地消失、也点不中。
+// main.js 需要 DOM、进不了本沙箱，但被它调用的 sim 是这里加载的真实代码。
+(function testSleepDragGrid() {
   const buildIso = () => {
     const nodes = [
       { id: 'hub', label: 'hub', kind: 'page' },
@@ -713,58 +814,19 @@ section('11. 主循环 handoff 门控 —— settle 不许把空闲停机钉死'
     const sim = GFI.Physics.create(D, GFI.config.physics);
     const fx = GFI.Effects.create(D, sim);
     for (let k = 0; k < 900; k++) sim.tick(DT);   // 跑到沉降入睡（与 §2 同量级）
-    // 网格最后一次重建时的节点位置 —— 之后 applyHandoff 会绕过模拟写坐标
+    // 网格最后一次重建时的节点位置 —— 之后拖拽会绕过模拟直接写坐标
     return { D, sim, fx, i, gridX: D.x[i], gridY: D.y[i] };
   };
 
-  // 复刻 interaction.js 松手：deg===0 ⇒ 刻意不 reheat ⇒ 模拟全程睡着
-  const release = (S, dx, dy) => {
-    const { D, sim, fx, i } = S;
-    const rx = D.x[i] + dx, ry = D.y[i] + dy;
-    sim.pin(i, D.x[i], D.y[i]);
-    sim.unpin(i);
-    D.x[i] = rx; D.y[i] = ry;
-    D.vx[i] = 600 * GFI.DT; D.vy[i] = 400 * GFI.DT;
-    fx.startSettle(i, rx, ry, 600, 400, rx + 30, ry + 20, 0.5);
-  };
-
-  // 返回"第几帧进入空闲"（等价于 main.js 里 idleFrames 开始累加），-1 = 永远忙
-  const runLoop = (S, guardWithAwake, maxFrames) => {
-    const { sim, fx } = S;
-    for (let f = 0; f < maxFrames; f++) {
-      const awake = sim.isAwake();
-      if (awake) sim.tick(DT);
-      fx.update(DT);
-      if (!guardWithAwake || awake) fx.applyHandoff(DT);
-      if (!(sim.isAwake() || fx.anyActive())) return f + 1;
-    }
-    return -1;
-  };
-
-  const MAX = 600;   // 10s，远超 maxSettleTime=1.5s
-
-  // ---- 改动前的门控：必须复现"永久空转" ----
-  const before = buildIso();
-  check('零度节点入睡后 alpha 低于 alphaMin', !before.sim.isAwake(),
-    `alpha=${before.sim.alpha.toExponential(2)}`);
-  release(before, 420, 300);
-  check('零度节点松手不重热（这正是危险路径）', !before.sim.isAwake(),
-    `alpha=${before.sim.alpha.toExponential(2)}`);
-  check('松手后 settle 已激活', before.fx.settleActive === true);
-
-  const stuck = runLoop(before, true, MAX);
-  check('【回归】awake 守卫下 settle 永不结束 → 空闲停机被钉死',
-    stuck === -1, stuck === -1 ? `${MAX} 帧后仍 busy` : `第 ${stuck} 帧就停了`);
-
-  // ---- 改动后的门控：必须在 maxSettleTime 内收敛并放行停机 ----
   const after = buildIso();
-  release(after, 420, 300);
-  const idleAt = runLoop(after, false, MAX);
-  check('handoff 无条件推进后 settle 自行结束', idleAt > 0,
-    idleAt > 0 ? `第 ${idleAt} 帧（${(idleAt * DT).toFixed(2)}s）进入空闲` : '仍然卡死');
-  check('结束后 settle 已清除', after.fx.settleActive === false);
-  check('结束后 fx.anyActive() 为假 → 可以让循环停机', after.fx.anyActive() === false);
-  check('结束后位置有限', Number.isFinite(after.D.x[after.i]) && Number.isFinite(after.D.y[after.i]));
+  check('零度节点入睡后 alpha 低于 alphaMin', !after.sim.isAwake(),
+    `alpha=${after.sim.alpha.toExponential(2)}`);
+
+  // 复刻 interaction.js 拖一个零度节点：pin 直接写坐标，且【不】唤醒模拟
+  after.sim.pin(after.i, after.D.x[after.i] + 420, after.D.y[after.i] + 300);
+  check('拖零度节点全程不唤醒模拟（这正是危险路径）', !after.sim.isAwake(),
+    `alpha=${after.sim.alpha.toExponential(2)}`);
+  check('拖拽不会让 fx 变成常驻活跃（空闲停机不被钉死）', after.fx.anyActive() === false);
 
   // ---- 网格刷新：睡着时 handoff 直接写坐标，网格必须跟上 ----
   // 不补 rebuildGrid 的话，被甩出的节点仍以【入睡时的网格位置】参与剔除，
@@ -873,6 +935,263 @@ section('13. 沉降后不得残留节点重叠');
     }
   }
   check('无完全重合的节点对', stacked === 0, `${stacked} 对`);
+})();
+
+// ===========================================================================
+section('14. 出生分槽 —— 同母体同帧兄弟必须角向错开（T1）');
+// ===========================================================================
+// 快进 / 拖滑块大步时，同一母体的多个子节点会在【同一帧】从母节点旁的 3px
+// 出生点喷出。旧实现每个子节点各自「背离质心 + ±0.78rad 抖动」——方向可能
+// 几乎重合，出生瞬间叠成一坨、靠碰撞逐帧顶开。现在按黄金角 137.5° 轮转分槽。
+(function testBuddingSlots() {
+  const T0 = Date.UTC(2024, 0, 1);
+  const DAY = 86400000;
+  const nodes = [
+    { id: 'hub', label: 'hub', kind: 'page', createdAt: T0 },
+    { id: 'l1', label: 'l1', kind: 'page', createdAt: T0 + DAY },
+    { id: 'l2', label: 'l2', kind: 'page', createdAt: T0 + DAY },
+    { id: 'l3', label: 'l3', kind: 'page', createdAt: T0 + DAY },
+    { id: 'l4', label: 'l4', kind: 'page', createdAt: T0 + DAY },
+  ];
+  const links = [
+    { source: 'hub', target: 'l1' }, { source: 'hub', target: 'l2' },
+    { source: 'hub', target: 'l3' }, { source: 'hub', target: 'l4' },
+  ];
+  const D8 = GFI.Data.build(nodes, links, null);
+  const sim8 = GFI.Physics.create(D8, GFI.config.physics);
+  const fx8 = GFI.Effects.create(D8, sim8);
+  const tl8 = GFI.Timeline.create(D8, sim8, fx8, {});
+
+  tl8.setCutoff(T0, { pulse: false });
+  // ⚠ 必须让淡出跑完（fx.update）—— visible 是 fade 走完才置 0。少了这一步，
+  //   第二次 setCutoff 会走「撤销淡出」分支而不是「揭示」，出生分槽根本不参与，
+  //   测到的"速度"只是余波（第一版探针实测 1.5~2.4，而喷射初速是 ~22）。
+  for (let k = 0; k < 60; k++) { sim8.tick(GFI.DT); fx8.update(GFI.DT); }
+
+  const leaves = [];
+  for (let i = 0; i < D8.n; i++) if (D8.deg[i] === 1) leaves.push(i);
+  check('前提：图谱 = 1 hub + 4 叶子', leaves.length === 4, `${leaves.length} 片叶子`);
+  let hiddenLeaves = 0;
+  for (const i of leaves) if (D8.visible[i] === 0) hiddenLeaves++;
+  check('前提：4 片叶子已完全隐藏（淡出走完）', hiddenLeaves === 4, `${hiddenLeaves}/4`);
+
+  // 叶子同帧揭示 —— 此刻速度就是出生喷射方向（kickSpeed 沿 dirX/dirY）
+  tl8.setCutoff(T0 + DAY, { pulse: false });
+  let kicked = 0;
+  for (const i of leaves) if (Math.hypot(D8.vx[i], D8.vy[i]) > 10) kicked++;
+  check('4 片叶子同帧全部获得喷射初速（|v| ≈ 22）', kicked === 4, `${kicked}/4`);
+
+  let minSep = Infinity;
+  for (let a = 0; a < leaves.length; a++) {
+    for (let b = a + 1; b < leaves.length; b++) {
+      const ia = leaves[a], ib = leaves[b];
+      const la = Math.hypot(D8.vx[ia], D8.vy[ia]) || 1;
+      const lb = Math.hypot(D8.vx[ib], D8.vy[ib]) || 1;
+      let dot = (D8.vx[ia] * D8.vx[ib] + D8.vy[ia] * D8.vy[ib]) / (la * lb);
+      if (dot > 1) dot = 1; else if (dot < -1) dot = -1;
+      const sep = Math.acos(dot);
+      if (sep < minSep) minSep = sep;
+    }
+  }
+  // 黄金角轮转下 4 兄弟的理论最小夹角 ≈ 0.92 rad；任意子数下界都 ≥ 0.5
+  check('同父兄弟出生方向最小夹角 ≥ 0.5 rad', minSep >= 0.5,
+    `最小夹角 ${minSep.toFixed(3)} rad`);
+
+  // 方向错开 → 第一 tick 就散开（碰撞根本不用介入）
+  sim8.tick(GFI.DT);
+  let minDist = Infinity;
+  for (let a = 0; a < leaves.length; a++) {
+    for (let b = a + 1; b < leaves.length; b++) {
+      const ia = leaves[a], ib = leaves[b];
+      const d = Math.hypot(D8.x[ia] - D8.x[ib], D8.y[ia] - D8.y[ib]);
+      if (d < minDist) minDist = d;
+    }
+  }
+  check('出生 1 tick 后兄弟最近间距 > 10 wu', minDist > 10,
+    `最近间距 ${minDist.toFixed(1)} wu（出生点相距仅 3px）`);
+})();
+
+// ===========================================================================
+section('15. 幽灵脉冲门控 —— magnitude=0 时时间轴不许白白重热（T2）');
+// ===========================================================================
+// 旧代码：maybePulse 无条件 sim.reheat(cfg.reheat.pulse=0.5)，而 fx.pulse 在
+// shock.magnitude=0（默认）时早就 return 了 —— 波没发出去，图却被重热得比
+// reheat.timelinePlay(0.32) 还狠，播放期间每 pulseThrottleMs 白翻腾一次。
+(function testGhostPulse() {
+  const T0 = Date.UTC(2024, 0, 1);
+  const DAY = 86400000;
+  const nodes = [
+    { id: 'hub', label: 'hub', kind: 'page', createdAt: T0 },
+    { id: 'a1', label: 'a1', kind: 'page', createdAt: T0 + DAY },
+    { id: 'a2', label: 'a2', kind: 'page', createdAt: T0 + DAY },
+    { id: 'a3', label: 'a3', kind: 'page', createdAt: T0 + DAY },
+    { id: 'b1', label: 'b1', kind: 'page', createdAt: T0 + 2 * DAY },
+    { id: 'b2', label: 'b2', kind: 'page', createdAt: T0 + 2 * DAY },
+    { id: 'b3', label: 'b3', kind: 'page', createdAt: T0 + 2 * DAY },
+  ];
+  const links = ['a1', 'a2', 'a3', 'b1', 'b2', 'b3'].map((t) => ({ source: 'hub', target: t }));
+  const D9 = GFI.Data.build(nodes, links, null);
+  const sim9 = GFI.Physics.create(D9, GFI.config.physics);
+  const fx9 = GFI.Effects.create(D9, sim9);
+  const tl9 = GFI.Timeline.create(D9, sim9, fx9, {});
+
+  const savedMag = GFI.config.shock.magnitude;
+  const VH = 10000;                       // 视口世界高度给足，避免 maxDisplacementRatio 钳幅
+
+  try {
+    // ---- 阶段 1：magnitude = 0（默认）----
+    GFI.config.shock.magnitude = 0;
+    tl9.setCutoff(T0, { pulse: false });
+    // ⚠ 两个前提缺一不可：① 淡出必须跑完（fx.update），否则下一批叶子还在
+    //   visible=1，第二次 setCutoff 走 cancelHide 而不是揭示；② 新建模拟的
+    //   alpha 从 1 起步，自然衰减的尾巴（~0.6）会把「有没有幽灵重热」糊掉。
+    for (let k = 0; k < 60; k++) { sim9.tick(GFI.DT); fx9.update(GFI.DT); }
+    sim9.alpha = GFI.config.physics.alphaMin;
+
+    tl9.setCutoff(T0 + DAY, { pulse: true, playing: true, viewportWorldHeight: VH });
+    check('mag=0：揭示只按 timelinePlay 重热（无 0.5 幽灵）',
+      sim9.alpha <= GFI.config.reheat.timelinePlay + 1e-6,
+      `alpha=${sim9.alpha.toFixed(3)}（timelinePlay=${GFI.config.reheat.timelinePlay}，pulse=${GFI.config.reheat.pulse}）`);
+    check('mag=0：波池仍为空', !fx9.pulsesActive());
+
+    // ---- 阶段 2：mag > 0 → 脉冲必须真的发射并重热 ----
+    GFI.config.shock.magnitude = 200;
+    sim9.alpha = 0.001;
+    tl9.setCutoff(T0 + 2 * DAY, { pulse: true, playing: true, viewportWorldHeight: VH });
+    check('mag>0：脉冲真的发射（波池非空）', fx9.pulsesActive());
+    check('mag>0：重热到 reheat.pulse',
+      sim9.alpha >= GFI.config.reheat.pulse - 1e-6,
+      `alpha=${sim9.alpha.toFixed(3)}`);
+  } finally {
+    GFI.config.shock.magnitude = savedMag;
+  }
+})();
+
+// ===========================================================================
+section('16. 活跃列表不变量（T3）—— 计数 = 列表长度，跑完必归零');
+// ===========================================================================
+// updatePops/updateFades 改成活跃索引列表后，「列表里每个 i 的 T 必须是数字」
+// 是硬不变量：任何把 T 置回 NaN 的路径（自然结束 / cancelHide / 被隐藏打断）
+// 都必须同步摘除，否则列表会残留幽灵项，popCount 与实际状态脱钩。
+(function testActiveLists() {
+  const demo = GFI.DataSource.demo(80, { seed: 21 });
+  const D10 = GFI.Data.build(demo.nodes, demo.links, null);
+  const sim10 = GFI.Physics.create(D10, GFI.config.physics);
+  const fx10 = GFI.Effects.create(D10, sim10);
+  const tl10 = GFI.Timeline.create(D10, sim10, fx10, {});
+
+  // ---- 揭示：pop 列表非空 → 跑完归零 ----
+  tl10.setCutoff(tl10.range.min, { pulse: false });
+  for (let k = 0; k < 60; k++) fx10.update(GFI.DT);
+  tl10.setCutoff(tl10.range.max, { pulse: false });
+  check('揭示后 popCount > 0', fx10.popCount > 0, `${fx10.popCount} 个 pop 在跑`);
+
+  // ---- 列表自检（跑动中做才有意义）：popT 为数字的节点数 === 列表长度 ----
+  let livePops = 0;
+  for (let i = 0; i < D10.n; i++) {
+    const t = D10.popT[i];
+    if (t === t) livePops++;
+  }
+  check('列表长度与 popT 实况一致', livePops === fx10.popCount,
+    `popT 为数字 ${livePops} / popCount ${fx10.popCount}`);
+
+  for (let k = 0; k < 90; k++) fx10.update(GFI.DT);
+  check('pop 跑完后归零', fx10.popCount === 0, `popCount=${fx10.popCount}`);
+  check('pop 期间没有 fade 混入', fx10.fadeCount === 0, `fadeCount=${fx10.fadeCount}`);
+
+  // ---- 隐藏：fade 列表非空 → 跑完归零 ----
+  tl10.setCutoff(tl10.range.min, { pulse: false });
+  check('隐藏后 fadeCount > 0', fx10.fadeCount > 0, `${fx10.fadeCount} 个 fade 在跑`);
+  for (let k = 0; k < 60; k++) fx10.update(GFI.DT);
+  check('fade 跑完后归零', fx10.fadeCount === 0, `fadeCount=${fx10.fadeCount}`);
+
+  // ---- 撤销淡出（cancelHide）：必须从 fade 列表摘除 ----
+  tl10.setCutoff(tl10.range.max, { pulse: false });   // 全部可见
+  for (let k = 0; k < 90; k++) fx10.update(GFI.DT);
+  tl10.setCutoff(tl10.range.min, { pulse: false });   // 开始淡出
+  const midFade = fx10.fadeCount;
+  tl10.setCutoff(tl10.range.max, { pulse: false });   // 淡出中途撤销
+  check('撤销淡出后 fadeCount 归零（列表已摘除）', fx10.fadeCount === 0,
+    `中途 ${midFade} → ${fx10.fadeCount}`);
+  for (let k = 0; k < 60; k++) fx10.update(GFI.DT);
+  let stillFading = 0;
+  for (let i = 0; i < D10.n; i++) if (D10.fadeT[i] === D10.fadeT[i]) stillFading++;
+  check('撤销后无残留淡出状态', stillFading === 0 && fx10.fadeCount === 0,
+    `fadeT 残留 ${stillFading} / fadeCount ${fx10.fadeCount}`);
+  check('特效全静后 anyActive 为假', !fx10.anyActive());
+})();
+
+// ===========================================================================
+section('17. 被固定节点的斥力对称性 —— 守卫不能写在配对的外层循环上');
+// ===========================================================================
+// 回归一个真实 bug：forceManyBody 的外层循环曾写成
+//     if (!activeMask[i] || pinMode[i] === PIN_HARD) continue;
+// 而内层是 `if (j <= i) continue;` —— 每对只算一次、对称施加，即外层 i 负责的是
+// 它和【更高序号】邻居之间那一对。于是 i 被固定时整对 (i, j>i) 被一起跳掉，
+// 两个方向的力同时消失：被固定的节点对【高序号】邻居完全「斥力隐身」，
+// 对低序号邻居却正常（那一对由低序号方作外层索引时被处理）—— 序号相关的非对称。
+// 表现是右键固定一个节点后，序号比它大的邻居会慢慢往它身上挤。
+//
+// 这与 §3 里零度节点那条是【同一类错误】：守卫写在外层循环上，就会连带抹掉
+// 成对的相互作用。被固定的节点不需要【接收】力，但必须照常【施加】力。
+//
+// 判据用【精确相等】：两次 build 是确定性的；跑 one tick 时所有力都在 integrate
+// 之前、按【同一批位置】算完 —— 所以把 P 钉住绝不能改变 P 施加给别人的力，
+// 除 P 自己以外每个节点的 vx/vy 必须一个 bit 都不差。
+(function testPinChargeSymmetry() {
+  const build = () => {
+    const demo = GFI.DataSource.demo(200, { seed: 11 });
+    const D = GFI.Data.build(demo.nodes, demo.links, null);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    sim.lod = 0;
+    for (let k = 0; k < 300; k++) sim.tick(DT);
+    return { D, sim };
+  };
+
+  // 挑一个【同时有低序号和高序号邻居】的节点，否则下面两条断言会因样本为空假通过
+  const pick = (D) => {
+    for (let i = D.n - 1; i >= 0; i--) {
+      if (D.deg[i] < 2) continue;
+      let lo = 0, hi = 0;
+      for (let p = D.adjStart[i]; p < D.adjStart[i + 1]; p++) {
+        if (D.adjList[p] < i) lo++; else hi++;
+      }
+      if (lo > 0 && hi > 0) return i;
+    }
+    return -1;
+  };
+
+  const A = build(), B = build();
+  const P = pick(A.D);
+  check('被测节点同时有低序号与高序号邻居', P >= 0, `index=${P}`);
+
+  A.sim.pin(P, A.D.x[P], A.D.y[P]);
+  A.sim.tick(DT);
+  B.sim.tick(DT);          // B 里 P 没被固定，位置完全一致
+
+  let maxLo = 0, maxHi = 0, loN = 0, hiN = 0;
+  for (let p = A.D.adjStart[P]; p < A.D.adjStart[P + 1]; p++) {
+    const j = A.D.adjList[p];
+    const d = Math.abs(A.D.vx[j] - B.D.vx[j]) + Math.abs(A.D.vy[j] - B.D.vy[j]);
+    if (j < P) { loN++; if (d > maxLo) maxLo = d; } else { hiN++; if (d > maxHi) maxHi = d; }
+  }
+  check('高序号邻居照常被推开（原来的 bug 就在这里）', maxHi === 0,
+    `${hiN} 个高序号邻居，最大速度偏差 ${maxHi}`);
+  check('低序号邻居照常被推开（原来就正常，防回退）', maxLo === 0,
+    `${loN} 个低序号邻居，最大速度偏差 ${maxLo}`);
+
+  // 全表逐位比对 —— 顺带覆盖不在 P 邻域内的节点
+  let maxAll = 0;
+  for (let j = 0; j < A.D.n; j++) {
+    if (j === P) continue;                       // P 自己本来就不该动
+    const d = Math.abs(A.D.vx[j] - B.D.vx[j]) + Math.abs(A.D.vy[j] - B.D.vy[j]);
+    if (d > maxAll) maxAll = d;
+  }
+  check('固定某节点不改变其余任何节点的受力（全表）', maxAll === 0, `最大速度偏差 ${maxAll}`);
+
+  // 反面：被固定的 P 自己必须【不受力】（applyPins 已把它的速度清零）
+  check('被固定的节点自身不被积分', A.D.vx[P] === 0 && A.D.vy[P] === 0,
+    `v=(${A.D.vx[P]}, ${A.D.vy[P]})`);
 })();
 
 // ===========================================================================

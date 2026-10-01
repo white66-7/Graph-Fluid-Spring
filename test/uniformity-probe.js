@@ -136,58 +136,13 @@ function runLayoutCal(tag, phys) {
 }
 
 // ---------------------------------------------------------------------------
-// 拖拽保位实验：复刻 interaction.js 抓取→拖动→松手，量回漂
+// 拖拽实验已【迁移到 test/drag-probe.js】
+//
+// 这里原来有一个 runDrag()，用来测「松手钉死」与「解析解沉降」两个方案的保位
+// 效果 —— 那两个方案都已从产品里删除（实测都更差，见 config.js 的 drag 段），
+// 继续留着只会误导。现在拖拽全链路（拖拽期间邻居跟随 / 松手停位）的测量
+// 一律在 test/drag-probe.js，本文件只负责布局均匀度。
 // ---------------------------------------------------------------------------
-function runDrag(tag, dragCfg) {
-  const d = GFI.config.drag, r = GFI.config.reheat;
-  Object.assign(d, { snapBackRatio: dragCfg.snapBack, elasticStiffness: 3.5, jellyDamping: 0.65, flingMomentum: 1.4 });
-  r.dragRelease = dragCfg.release;
-
-  const demo = GFI.DataSource.demo(300, { seed: 7, clusters: 5 });
-  const D = GFI.Data.build(demo.nodes, demo.links, null);
-  const sim = GFI.Physics.create(D, GFI.config.physics);
-  const fx = GFI.Effects.create(D, sim);
-  sim.lod = 0;
-  for (let k = 0; k < 600; k++) sim.tick(DT);    // 先沉降
-
-  // 选一个 2≤deg≤6 的中低度节点（拖回漂最明显的就是它）
-  let i = -1;
-  for (let k = 0; k < D.n; k++) if (D.deg[k] >= 2 && D.deg[k] <= 6) { i = k; break; }
-  const homeX = D.x[i], homeY = D.y[i];
-
-  // 抓取（interaction.js:206/215）+ 拖动 ticks 平移 (200,120)，再在放下点悬停 holdTick
-  // ⚠ 每个拖拽步之间必须真跑 sim.tick —— 真实拖拽里邻居是在帧间被弹簧拉动的，
-  //   只连发 pin 不 tick 等于瞬移，邻居完全来不及响应（第一版探针的 bug）。
-  sim.pin(i, homeX, homeY);
-  sim.setAlphaTarget(r.dragStart);
-  if (D.deg[i] > 0) sim.reheat(r.dragStart);
-  const dropX = homeX + 200, dropY = homeY + 120;
-  const ticks = dragCfg.ticks;
-  for (let k = 1; k <= ticks; k++) {
-    sim.pin(i, homeX + 200 * k / ticks, homeY + 120 * k / ticks);
-    sim.tick(DT);
-  }
-  for (let k = 0; k < (dragCfg.hold || 0); k++) { sim.pin(i, dropX, dropY); sim.tick(DT); }
-
-  // 松手（interaction.js 松手分支，无甩掷）
-  sim.setAlphaTarget(0);
-  if (dragCfg.stick) {
-    // 🌟 新分支：保持 pin，节点钉在放下点，只重热邻域
-    if (D.deg[i] > 0) sim.reheat(r.dragRelease);
-    for (let k = 0; k < 500; k++) sim.tick(DT);
-  } else {
-    sim.unpin(i);
-    D.x[i] = dropX; D.y[i] = dropY;
-    D.vx[i] = 0; D.vy[i] = 0;
-    fx.startSettle(i, dropX, dropY, 0, 0, dropX, dropY, 1);   // snapBack=0 → 目标=放下点
-    if (D.deg[i] > 0) sim.reheat(r.dragRelease);
-    for (let k = 0; k < 500; k++) { sim.tick(DT); fx.applyHandoff(DT); }
-  }
-
-  const back = Math.hypot(D.x[i] - dropX, D.y[i] - dropY);
-  const home = Math.hypot(D.x[i] - homeX, D.y[i] - homeY);
-  console.log(tag.padEnd(46) + ` 离放下点=${back.toFixed(1)}wu  离原位=${home.toFixed(1)}wu  (拖距 234wu)`);
-}
 
 // ===========================================================================
 console.log('── 布局均匀度（500 节点 seed=42 clusters=8，900 tick 沉降，LOD0，ld=50）──');
@@ -203,10 +158,4 @@ runLayoutCal('A 现行', { collideStrength: 0.85, gravity: 3, charge: -0.10, col
 runLayoutCal('C 候选', { collideStrength: 1.0, gravity: 2, charge: -0.10, collidePad: 6 });
 runLayoutCal('E 候选', { collideStrength: 1.0, gravity: 2, charge: -0.12, collidePad: 6 });
 
-console.log('\n── 拖拽保位（300 节点 seed=7，拖 234wu，松手 500 tick）──');
-console.log('（Obsidian 行为 = 松手后离放下点近；邻居没跟上时弹簧会把节点拽回去）');
-runDrag('快拖45t 松手  现行 snap.22 rel.4', { snapBack: 0.22, release: 0.4, ticks: 45 });
-runDrag('快拖45t 松手  snap0 rel.3 不固定', { snapBack: 0, release: 0.3, ticks: 45 });
-runDrag('慢拖135t     snap0 rel.3 不固定', { snapBack: 0, release: 0.3, ticks: 135 });
-runDrag('快拖45t+悬停90t snap0 rel.3 不固定', { snapBack: 0, release: 0.3, ticks: 45, hold: 90 });
-runDrag('快拖45t 松手  🌟 stick 固定', { snapBack: 0, release: 0.3, ticks: 45, stick: true });
+console.log('\n（拖拽链路另见 test/drag-probe.js —— 本文件只测布局均匀度）');

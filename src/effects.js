@@ -60,11 +60,6 @@
     let pulseWrite = 0;
 
     // -----------------------------------------------------------------------
-    // (c) 拖拽沉降状态（同一时刻只有一个）
-    // -----------------------------------------------------------------------
-    let settle = null;
-
-    // -----------------------------------------------------------------------
     // 计数（用于空闲判定）
     // -----------------------------------------------------------------------
     // 🌟 T3 活跃索引列表：pop/fade 的逐帧推进从「全表 O(n) 扫描」改成「只扫活跃项」。
@@ -80,7 +75,6 @@
     const fx = {
       get popCount() { return popN; },
       get fadeCount() { return fadeN; },
-      get settleActive() { return settle !== null; },
     };
 
     // =======================================================================
@@ -100,7 +94,12 @@
       // 🌟 Obsidian 分裂机制：受力权重首帧即全开（1.0），连线弹簧立即紧绷产生回弹
       D.simWeight[i] = 1.0;
 
-      if (D.fadeT[i] === D.fadeT[i]) fadeCount--;
+      if (D.fadeT[i] === D.fadeT[i]) {
+        // 复活一个正在淡出的节点 → 从活跃列表摘除，fadeT 同步清掉
+        for (let k = 0; k < fadeN; k++) {
+          if (fadeList[k] === i) { fadeList[k] = fadeList[--fadeN]; break; }
+        }
+      }
       D.fadeT[i] = NaN;
     };
 
@@ -128,8 +127,11 @@
     // =======================================================================
     // 激波
     // =======================================================================
+    // 🌟 T2：返回值 = 是否【真的】发射了一道波。magnitude=0（当前默认）或
+    //   被视口钳制到 0 时返回 false —— 调用方（timeline.maybePulse）据此前止
+    //   「波没发出去、图却被 reheat(0.5) 白白重热」的幽灵脉冲。
     fx.pulse = function pulse(o) {
-      if (!pulsesEnabled) return;
+      if (!pulsesEnabled) return false;
       o = o || {};
       const sc = cfg.shock;
 
@@ -140,7 +142,7 @@
         const maxMag = (sc.maxDisplacementRatio * vh * decayRate);
         if (mag > maxMag) mag = maxMag;
       }
-      if (mag <= 0) return;
+      if (mag <= 0) return false;
 
       const p = pulses[pulseWrite];
       pulseWrite = (pulseWrite + 1) % poolSize;
@@ -155,84 +157,18 @@
       p.decayLen = sc.decayLen;
       p.maxR = Math.min(sc.maxRadius, o.maxRadius || sc.maxRadius);
       p.J = mag * (o.sign < 0 ? sc.backwardSign : 1);
+      return true;
     };
 
-    fx.setPulsesEnabled = function setPulsesEnabled(b) { pulsesEnabled = !!b; };
+    // 🌟 关闭时顺手清空波池：updatePulses 会因 !pulsesEnabled 早退，池里若还挂着
+    //   active 的波就永远没人收尾 —— pulsesActive() 卡死为 true，timeline 的
+    //   maybePulse 从此被它的前置检查吞掉。
+    fx.setPulsesEnabled = function setPulsesEnabled(b) {
+      pulsesEnabled = !!b;
+      if (!pulsesEnabled) fx.clearPulses();
+    };
     fx.clearPulses = function clearPulses() {
       for (let i = 0; i < poolSize; i++) pulses[i].active = false;
-    };
-
-    // =======================================================================
-    // 拖拽沉降
-    // =======================================================================
-    fx.startSettle = function startSettle(i, releaseX, releaseY, velX, velY, targetX, targetY, camK) {
-      const d = cfg.drag;
-      const w0 = d.elasticStiffness;
-      const zeta = d.jellyDamping;
-      const wd = w0 * Math.sqrt(Math.max(0, 1 - zeta * zeta)) || 1e-4;
-
-      const x0 = releaseX - targetX;
-      const y0 = releaseY - targetY;
-
-      const tNom = clamp(3 / Math.max(0.001, zeta * w0), 0.3, d.maxSettleTime);
-
-      settle = {
-        i,
-        targetX, targetY,
-        cAx: x0, cAy: y0,
-        cBx: (velX + zeta * w0 * x0) / wd,
-        cBy: (velY + zeta * w0 * y0) / wd,
-        w0, zeta, wd,
-        t: 0,
-        tNom,
-        blendFrom: tNom * 0.55,
-        stopVel: 0.12 / Math.max(0.05, camK),
-        stopDist: 0.4 / Math.max(0.05, camK),
-      };
-    };
-
-    fx.cancelSettle = function cancelSettle() { settle = null; };
-
-    fx.applyHandoff = function applyHandoff(dt) {
-      if (!settle) return;
-      const s = settle;
-      const i = s.i;
-      s.t += dt;
-
-      const decay = Math.exp(-s.zeta * s.w0 * s.t);
-      const cosT = Math.cos(s.wd * s.t);
-      const sinT = Math.sin(s.wd * s.t);
-
-      const xAna = s.targetX + decay * (s.cAx * cosT + s.cBx * sinT);
-      const yAna = s.targetY + decay * (s.cAy * cosT + s.cBy * sinT);
-
-      const dDecay = -s.zeta * s.w0 * decay;
-      const vxAna = dDecay * (s.cAx * cosT + s.cBx * sinT) + decay * (-s.cAx * s.wd * sinT + s.cBx * s.wd * cosT);
-      const vyAna = dDecay * (s.cAy * cosT + s.cBy * sinT) + decay * (-s.cAy * s.wd * sinT + s.cBy * s.wd * cosT);
-
-      const w = s.t <= s.blendFrom
-        ? 1
-        : clamp(1 - (s.t - s.blendFrom) / Math.max(0.0001, s.tNom - s.blendFrom), 0, 1);
-
-      const xSim = D.x[i], ySim = D.y[i];
-      const vxSim = D.vx[i], vySim = D.vy[i];
-
-      D.x[i] = xSim * (1 - w) + xAna * w;
-      D.y[i] = ySim * (1 - w) + yAna * w;
-      D.vx[i] = vxSim * (1 - w) + vxAna * DT * w;
-      D.vy[i] = vySim * (1 - w) + vyAna * DT * w;
-
-      const dist = Math.hypot(xAna - s.targetX, yAna - s.targetY);
-      const speed = Math.hypot(vxAna, vyAna);
-
-      if (w <= 0 || (s.t > 0.20 && speed < s.stopVel && dist < s.stopDist) || s.t > cfg.drag.maxSettleTime) {
-        settle = null;
-        // 只有【有邻居】的节点才重热 —— 与 interaction.js 松手处同一条规则。
-        // 零度节点甩完就该安安静静停住，不该把整张图一起晃起来。
-        // （零度节点这条路径同时也不 reheat，所以模拟全程睡着，正是 main.js
-        //   必须无条件推进 handoff、并按需 rebuildGrid 的原因。）
-        if (D.deg[i] > 0) sim.reheat(cfg.reheat.dragRelease);
-      }
     };
 
     // =======================================================================
@@ -245,7 +181,7 @@
     };
 
     function updatePops(dt) {
-      if (popCount <= 0) return;
+      if (popN <= 0) return;
 
       const { amp, omega, zeta, fadeInTime } = cfg.pop;
       const decayRate = Math.max(0.0001, zeta * omega);
@@ -254,19 +190,27 @@
       const popT = D.popT, popDur = D.popDur, scaleMul = D.scaleMul,
         renderAlpha = D.renderAlpha, simWeight = D.simWeight, fadeT = D.fadeT;
 
-      for (let i = 0; i < n; i++) {
-        let t = popT[i];
-        if (t !== t) continue;
+      // 🌟 T3：只扫活跃列表。所有摘除走 swap-remove 且【不 j++】——
+      //   换到当前槽位的是原本排在后面的、本帧还没处理的元素。
+      let j = 0;
+      while (j < popN) {
+        const i = popList[j];
+        const t = popT[i];
 
-        if (fadeT[i] === fadeT[i]) { popT[i] = NaN; popCount--; continue; }
+        // 不变量自愈：popT 已被别的路径清成 NaN → 直接摘除（理论上不发生）
+        if (t !== t || fadeT[i] === fadeT[i]) {
+          if (t === t) popT[i] = NaN;
+          popList[j] = popList[--popN];
+          continue;
+        }
 
         if (t < 0) {
-          t += dt;
-          if (t < 0) { popT[i] = t; continue; }
+          const t2 = t + dt;
+          if (t2 < 0) { popT[i] = t2; j++; continue; }   // 还在延迟期
           popT[i] = 0;
         }
 
-        const elapsed = t + dt;
+        const elapsed = popT[i] + dt;
         popT[i] = elapsed;
 
         const e = Math.exp(-decayRate * elapsed);
@@ -281,22 +225,30 @@
           scaleMul[i] = 1;
           renderAlpha[i] = 1;
           simWeight[i] = 1;
-          popCount--;
+          popList[j] = popList[--popN];
+          continue;
         }
+        j++;
       }
     }
 
     function updateFades(dt) {
-      if (fadeCount <= 0) return;
+      if (fadeN <= 0) return;
 
       const fadeTime = Math.max(0.001, cfg.timeline.hideFadeTime);
       const shrink = cfg.timeline.hideShrink;
       const fadeT = D.fadeT, renderAlpha = D.renderAlpha, simWeight = D.simWeight,
         scaleMul = D.scaleMul, visible = D.visible;
 
-      for (let i = 0; i < n; i++) {
+      let j = 0;
+      while (j < fadeN) {
+        const i = fadeList[j];
         let t = fadeT[i];
-        if (t !== t) continue;
+
+        if (t !== t) {                   // 不变量自愈（正常路径 cancelHide 已摘除）
+          fadeList[j] = fadeList[--fadeN];
+          continue;
+        }
 
         t += dt / fadeTime;
         if (t >= 1) {
@@ -304,13 +256,14 @@
           visible[i] = 0;
           simWeight[i] = 0;
           renderAlpha[i] = 0;
-          fadeCount--;
+          fadeList[j] = fadeList[--fadeN];
           continue;
         }
         fadeT[i] = t;
         renderAlpha[i] = 1 - t;
         simWeight[i] = D.fadeFrom[i] * (1 - t);
         scaleMul[i] = 1 - (1 - shrink) * t;
+        j++;
       }
     }
 
@@ -352,7 +305,7 @@
     }
 
     fx.anyActive = function anyActive() {
-      return popCount > 0 || fadeCount > 0 || settle !== null || pulsesActive();
+      return popN > 0 || fadeN > 0 || pulsesActive();
     };
 
     function pulsesActive() {
@@ -367,13 +320,11 @@
       D.scaleMul.fill(1, 0, n);
       D.renderAlpha.fill(1, 0, n);
       D.simWeight.fill(1, 0, n);
-      popCount = 0; fadeCount = 0;
-      settle = null;
+      popN = 0; fadeN = 0;
       fx.clearPulses();
     };
 
     fx.destroy = function destroy() {
-      settle = null;
       fx.clearPulses();
     };
 

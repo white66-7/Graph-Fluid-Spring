@@ -41,6 +41,14 @@
     const _centroid = { x: 0, y: 0, k: 0 };
     let lastPulseAt = -1e9;
 
+    // 🌟 T1 出生分槽的复用缓冲 —— create 期一次分配，逐帧零分配。
+    //   revealSlot[p] 两阶段复用：pass A 当「本帧子节点计数」，pass B 当「槽位游标」，
+    //   pass B 结束时恰好减回 0，无需清理；每帧开头 fill(0) 清掉上一帧的残值。
+    //   GOLDEN = 黄金角 137.5°：整数倍轮转在圆周上均匀散开，任意子数都不重缝。
+    const revealSlot = new Int32Array(D.n);
+    const parentOf = new Int32Array(D.n);
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+
     // =======================================================================
     // 脉冲（可选的背景扰动波）
     // =======================================================================
@@ -55,6 +63,12 @@
     }
 
     function maybePulse(forward, origin, viewportWorldHeight) {
+      // 🌟 T2：shock.magnitude = 0（默认）时 pulse 必然早退、波根本不会发射 ——
+      //   在做任何 O(n) 工作（centroid/bounds）之前就返回。旧代码走到最后的
+      //   sim.reheat(0.5) 是【无条件】的：波没发出去，图却被重热得比
+      //   reheat.timelinePlay(0.32) 还狠，播放期间每 pulseThrottleMs 白翻腾一次。
+      if (!(cfg.shock.magnitude > 0)) return;
+
       const now = GFI.util.now();
       if (now - lastPulseAt < cfg.timeline.pulseThrottleMs) return;
       if (fx.pulsesActive && fx.pulsesActive()) return;
@@ -68,26 +82,27 @@
         Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * 0.5 * cfg.shock.maxRadiusFactor
       );
 
-      fx.pulse({
+      // 🌟 pulse() 返回是否真的发射了波（幅度可能被钳到 0）—— 只在真发射时重热
+      const fired = fx.pulse({
         ox: o.x,
         oy: o.y,
         sign: forward ? 1 : -1,
         viewportWorldHeight,
         maxRadius: radius,
       });
-      sim.reheat(cfg.reheat.pulse);
+      if (fired) sim.reheat(cfg.reheat.pulse);
     }
 
     // =======================================================================
     // 揭示锚点：Obsidian 母体细胞分裂计算
     // =======================================================================
-    function anchorFor(i, visCentroid) {
+    // 母体 = 度数最高且【已可见】的邻居。⚠ 必须在本帧任何 beginReveal 把
+    // 兄弟节点置 visible=1 之前调用 —— 否则同帧的兄弟可能互相选成母体，
+    // 每个节点的母体就取决于遍历顺序了。setCutoff 的 pass A 已保证这一点。
+    function findParent(i) {
       const s = D.adjStart[i], e = D.adjStart[i + 1];
-
       let parentIdx = -1;
       let maxDeg = -1;
-
-      // 寻找度数最高且已处于可见状态的邻居，作为主要分裂母体
       for (let p = s; p < e; p++) {
         const j = D.adjList[p];
         if (!D.visible[j]) continue;
@@ -96,7 +111,12 @@
           parentIdx = j;
         }
       }
+      return parentIdx;
+    }
 
+    // parentIdx / slot 由 setCutoff 的两趟扫描传入（pass A 计数、pass B 发射），
+    // slot 是该节点在【同一母体同帧兄弟】里的黄金角序号。
+    function anchorFor(i, visCentroid, parentIdx, slot) {
       // 情况 1：存在母节点 —— 紧贴母节点向外侧爆破喷射
       if (parentIdx !== -1) {
         const px = D.x[parentIdx];
@@ -109,9 +129,13 @@
 
         if (Math.abs(px - cx) < 1e-3 && Math.abs(py - cy) < 1e-3) {
           angle = jitter(i, 30, Math.PI);
+          // 🌟 T1：黄金角轮转取代「±0.78rad 各自乱抖」—— 快进/拖滑块大步时
+          //   同一母体的多个子节点同帧从同一个 3px 点叠着喷出，靠碰撞逐帧顶开，
+          //   观感是「炸出一坨」。137.5° 一档让兄弟从第一个 tick 就彼此错开；
+          //   哈希微扰降到 ±14°，只负责去掉机械感。确定性哈希，无随机源。
+          angle += slot * GOLDEN;
         } else {
-          // 叠加大自然般的有机散射角（±45度散开）
-          angle += jitter(i, 31, 0.78);
+          angle += slot * GOLDEN + jitter(i, 31, 0.25);
         }
 
         const dirX = Math.cos(angle);
@@ -173,13 +197,28 @@
 
       let revealed = 0, hidden = 0;
 
+      // 🌟 T1 pass A：给本帧每个新生节点找母体并按母体计数。
+      //   ⚠ 必须赶在任何 beginReveal 把兄弟置 visible=1 之前 —— 母体候选条件
+      //   是 visible[j]，这样本帧的兄弟互相看不见、谁也不会被选成母体。
+      revealSlot.fill(0, 0, D.n);
+      for (let i = 0; i < D.n; i++) {
+        if (D.wantVisible[i] !== 1 || D.visible[i] !== 0) continue;
+        const p = findParent(i);
+        parentOf[i] = p;
+        if (p !== -1) revealSlot[p]++;
+      }
+
       for (let i = 0; i < D.n; i++) {
         const want = D.wantVisible[i];
         const isFading = D.fadeT[i] === D.fadeT[i];
 
         if (want === 1 && D.visible[i] === 0) {
           // ---- 揭示：Obsidian 母体分裂与反冲爆发 ----
-          const spawn = anchorFor(i, visCentroid);
+          // 🌟 T1 pass B：槽位游标倒序发放 —— pass A 存的是兄弟总数 k，
+          //   这里逐个 -- 后得到 k-1 … 0，配合黄金角把兄弟在圆周上错开；
+          //   循环结束时每个用过的槽位恰好减回 0，天然为下一帧复位。
+          const p = parentOf[i];
+          const spawn = anchorFor(i, visCentroid, p, p !== -1 ? --revealSlot[p] : -1);
           D.x[i] = spawn.x;
           D.y[i] = spawn.y;
 

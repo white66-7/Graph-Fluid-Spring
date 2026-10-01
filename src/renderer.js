@@ -60,6 +60,10 @@
     // pad 用于容纳 halo 描边的外溢；高度取【行高】而不是逐字符串的实际字形高 ——
     // 否则 "abc" 与 "Äg" 会得到不同的精灵高度，画出来基线互相错位。
     let labelPad = 4, labelBoxH = 24;
+    // 标签【文字】与节点下缘之间的间隙（屏幕像素）。摆设方式见 drawOne：名字在节点正下方。
+    // ⚠ 这是"文字下缘到节点下缘"的距离 —— 精灵盒的透明 padding 不计入，
+    //   否则每个标签看起来都会飘在节点下方，认不出属于哪个节点。
+    const LABEL_GAP = 3;
     function refreshLabelMetrics() {
       const m = /(\d+(?:\.\d+)?)px/.exec(rcfg.labelFont);
       const size = m ? parseFloat(m[1]) : 12;
@@ -71,6 +75,28 @@
     // 标签占位网格（抑制密集处互相糊）
     let occW = 0, occH = 0;
     let occGrid = new Uint8Array(0);
+
+    // 🌟 L1/L2 标签时序状态（按节点，随本管线的数据 D 一次性分配）：
+    //   labelA    当前 alpha（0..1）。胜者每帧爬升 RISE，败者/未遍历者衰减 FALL ——
+    //             标签的进出从「啪地出现/消失」变成 ~100/70ms 的交叉渐变。
+    //   labelShown 上一帧的胜者集合（滞回）：本帧先画它们（H 遍）再让新候选补位
+    //             （N 遍）—— 占位格每帧清零，竞争胜负原本完全由「空间序」决定，
+    //             漂移/平移时节点跨格，胜负帧间翻转 → 标签一闪一闪。
+    //   labelWon  本帧胜出标记，收尾扫描时滚入 labelShown。
+    //   RISE/RISE_HI/FALL 是每帧步进（60fps 下 ≈100/50/67ms）；渲染循环不需要
+    //   真实 dt —— 精灵 alpha 的渐变对帧率不敏感。
+    let labelA = new Float32Array(D.n);
+    let labelShown = new Uint8Array(D.n);
+    let labelWon = new Uint8Array(D.n);
+    const RISE = 1 / 6, RISE_HI = 1 / 3, FALL = 1 / 4;
+
+    // 🌟 L3 全局淡变系数：main.js 对 labelsOn 布尔滞回做 alpha 补间后传入 view，
+    //   ≤0 时整层跳过。0→正数的上升沿会把胜者集合作废（离屏期间布局可能漂了）。
+    let labelFadeMul = 1, lblPrevFade = -1;
+
+    // 🌟 L2 相机突变检测：k 变化 >10% 或平移 >40px 时胜者集合整体作废 ——
+    //   宁可重排一帧（有 L1 渐变兜底，不闪），也不让陈旧胜者挂在不存在的位置上。
+    let lblK = 0, lblTx = 0, lblTy = 0, lblInit = false;
 
     // 精灵缓存
     const spriteCache = new Map();
@@ -194,8 +220,8 @@
       const g = c.getContext('2d');
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.font = rcfg.labelFont;
-      // 🌟 Obsidian 摆放：文字【左对齐】画在节点右侧 —— 精灵内部同样左对齐，
-      //   文字左缘 = labelPad。blit 时把精灵左缘对到 (sx - labelPad) 即可。
+      // 精灵内部文字【左对齐】、文字左缘 = labelPad。
+      // 外面按"精灵左缘居中到节点圆心"摆放（见 drawOne），文字因此也居中。
       g.textAlign = 'left';
       g.textBaseline = 'middle';
       g.lineJoin = 'round';
@@ -244,10 +270,16 @@
       return e;
     }
 
+
     function invalidateSprites() {
       spriteCache.clear();
       labelCache.clear();
       refreshLabelMetrics();     // labelFont / haloWidth / dpr 都可能变了
+      // 🌟 字号/ halo 变了 → 标签包围盒全变 → 占位与渐变状态整体作废
+      labelA.fill(0, 0, D.n);
+      labelShown.fill(0, 0, D.n);
+      labelWon.fill(0, 0, D.n);
+      lblInit = false;
     }
 
     // -----------------------------------------------------------------------
@@ -322,7 +354,14 @@
       const tCore = GFI.util.now();
 
       labelDrawn = 0;
-      if (view.labelsOn) drawLabels(nodeList, nodeCount, lodCfg, k, hot);
+      // 🌟 L3 全局淡变系数：main.js 按【缩放的连续函数】算出目标再叠时间补间（0..1）。
+      //   未传 = 1（直调/旧行为）。lblPrevFade 必须每帧都记 —— 即使本帧整层跳过，
+      //   否则 0→正 的上升沿在下一次 drawLabels 里就探测不到了。
+      const lf = view.labelFade;
+      labelFadeMul = lf === undefined ? 1 : (lf > 0 ? (lf < 1 ? +lf : 1) : 0);
+      const fadeRising = labelFadeMul > 0 && lblPrevFade <= 0;
+      lblPrevFade = labelFadeMul;
+      if (view.labelsOn && labelFadeMul > 0) drawLabels(nodeList, nodeCount, lodCfg, k, hot, fadeRising);
       const tLabel = GFI.util.now();
 
       drawOverlay(hoverIdx, selectedIdx, k, lodCfg);
@@ -516,11 +555,27 @@
     // -----------------------------------------------------------------------
     // （原有一个 measure() + measureText 缓存，从未被任何地方调用过 —— 已经删掉。
     //   宽度现在由 labelCache 的精灵条目一并提供，见文件上方 makeLabelSprite。）
-    function drawLabels(list, count, lodCfg, k, hot) {
+    function drawLabels(list, count, lodCfg, k, hot, fadeRising) {
       if (!count) return;
       labelFrame++;      // 精灵缓存的"最近使用"时间戳
 
-      // 占位网格
+      // ---- 🌟 L2 失效检测（必须先于一切 labelShown 的使用）----
+      // 相机 k 突变（>10%）/ 平移突变（>40px）/ 淡变上升沿 → 上一帧的胜者
+      // 集合整体作废：宁可让标签按名次重排一帧（有 L1 渐变兜底，不闪），
+      // 也不让陈旧胜者挂在已经对不上的位置上。
+      const tx0 = cam.worldToScreenX(0), ty0 = cam.worldToScreenY(0);
+      const jumped = !lblInit
+        || Math.abs(k - lblK) > 0.1 * Math.max(1e-9, lblK)
+        || Math.abs(tx0 - lblTx) > 40
+        || Math.abs(ty0 - lblTy) > 40
+        || !!fadeRising;
+      lblInit = true; lblK = k; lblTx = tx0; lblTy = ty0;
+      if (jumped) labelShown.fill(0, 0, D.n);
+
+      // 占位网格 —— 两种策略都要用：
+      //   labelYield = true  → 判"谁赢"（重叠的藏起来）
+      //   labelYield = false → 判"谁该变暗"（重叠的照画但压暗）
+      // 所以这里不再按开关跳过分配。
       const cell = rcfg.labelCell;
       const cw = Math.ceil(W / cell), ch = Math.ceil(H / cell);
       if (cw !== occW || ch !== occH) {
@@ -561,6 +616,10 @@
         //   全部显示。之前这里让位，而占位抑制改按整个包围盒标记之后，hub 的
         //   邻居们（它们本来就聚在一起）开始真的互相挤掉，看起来就是
         //   "悬浮后连接的节点显示不全"。**让位只属于常态模式。**
+        // 🌟 L1：非邻域标签不再走 return 短路 —— 收尾扫描会把它们的 alpha
+        //   衰减到 0（~70ms 淡出），悬浮切换从「其余标签啪地消失」变成渐隐；
+        //   收尾扫描同时会把 labelShown 清到只剩邻域 —— 退出悬浮后从干净
+        //   状态按名次重建，不会挂陈旧胜者。
         if (visible[hot]) drawOne(hot, cell, cw, ch, x, y, label, radius, scaleMul, k, true, true);
         for (let p = 0; p < count; p++) {
           const i = list[p];
@@ -568,22 +627,41 @@
           if (renderAlpha[i] < 0.55) continue;
           drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, true);
         }
+        finishLabelFrame(n);
         return;
       }
 
-      // ---- 模式 B：常态下按度数名次画到上限 ----
-      // 分档遍历：度数高的先画、先占住占位格。
-      // 直接一趟遍历 nodeList 的话，先到先得的是网格顺序（≈空间顺序），
-      // 密集区里谁能留下完全随机，hub 反而可能被叶子挤掉。
-      // ⚠ 占位格现在是【真抑制】之后，先后顺序从"锦上添花"变成了决定性的 ——
-      //   先画的赢，所以这条名次分档是标签质量的关键。
+      // ---- 模式 B：常态下画标签 —— 🌟 L2 两遍遍历（滞回）----
+      //
+      // ⚠ 两遍遍历与下面的名次分档，作用都只是【在开启让位时决定谁先占位】。
+      //   `render.labelYield = false`（默认）时 drawOne 全部走 force 路径 ——
+      //   不查也不标占位格，人人都画，先后顺序不再有胜负含义，但遍历本身照跑
+      //   （代价只是多一趟 O(视口节点数) 的循环，与画精灵的开销比可忽略）。
+      //
+      // H 遍：上一帧的胜者先画先占。占位格每帧清零，胜负原本完全由遍历的
+      //   空间序决定 —— 漂移/平移时节点跨格，两个竞争标签的胜负帧间翻转，
+      //   观感就是一闪一闪。让守擂者先落子，竞争只剩「守擂 vs 新挑战」，
+      //   布局连续时守擂必赢 → 胜负稳定。胜者集合只增不减也没关系：
+      //   收尾扫描会把本帧没画的从集合里除名。
+      for (let p = 0; p < count; p++) {
+        const i = list[p];
+        if (!labelShown[i] || !visible[i]) continue;
+        if (!journalLabelsOn && kind[i] === JK) continue;
+        if (renderAlpha[i] < 0.55) continue;
+        drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, false);
+      }
+
+      // N 遍：新候选按度数名次分档补空位（原有逻辑）。
+      // 分档的意义：度数高的先画、先占住占位格 —— 直接一趟遍历的话，
+      // 先到先得的是网格顺序（≈空间顺序），密集区里 hub 反而可能被叶子挤掉。
+      // ⚠ 占位格是真抑制，先后顺序是决定性的 —— 先画的赢。
       const PASSES = 4;
       const step = Math.max(1, Math.ceil((rankCap + 1) / PASSES));
       for (let lo = -1; lo < rankCap; lo += step) {
         const hiRank = Math.min(rankCap, lo + step);
         for (let p = 0; p < count; p++) {
           const i = list[p];
-          if (!visible[i]) continue;
+          if (labelShown[i] || !visible[i]) continue;   // 已在 H 遍处理过
           // 日记标签开关在【精灵创建之前】跳过 —— 顺便不为不会画的标签预热缓存
           if (!journalLabelsOn && kind[i] === JK) continue;
           const rk = labelRank[i];
@@ -591,6 +669,24 @@
           if (renderAlpha[i] < 0.55) continue;
           drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, false);
         }
+      }
+
+      finishLabelFrame(n);
+    }
+
+    // 🌟 L1/L2 每帧收尾：胜者滚入滞回集合；其余（败者 / 被剔除出屏的 / 超出
+    // labelCap 的 / 悬浮时非邻域的）alpha 统一衰减 —— 只要不胜出就淡出，
+    // 所以任何路径都不会把标签「啪」地掐断。
+    function finishLabelFrame(n) {
+      for (let i = 0; i < n; i++) {
+        if (labelWon[i]) {
+          labelWon[i] = 0;
+          labelShown[i] = 1;
+          continue;
+        }
+        if (labelShown[i]) labelShown[i] = 0;
+        const a = labelA[i];
+        if (a > 0) labelA[i] = a > FALL ? a - FALL : 0;
       }
     }
 
@@ -600,23 +696,24 @@
      * @param {boolean} force 跳过重叠让位。邻域模式（模式 A）下全部为 true ——
      *   悬浮的意图就是把这一圈邻居全亮出来，让位只属于常态模式。
      */
+    /** 节点名字最终显示成什么（labelMaxChars = 0 时表示从不截断，Obsidian 行为） */
+    function displayText(full) {
+      return (rcfg.labelMaxChars > 0 && full.length > rcfg.labelMaxChars)
+        ? full.slice(0, rcfg.labelMaxChars - 1) + '…'
+        : full;
+    }
+
     function drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, hi, force) {
       const full = label[i];
       if (!full) return;
       // 🌟 labelMaxChars = 0 表示【从不截断】（Obsidian 行为：名字永远显示全）。
-      const text = rcfg.labelMaxChars > 0 && full.length > rcfg.labelMaxChars
-        ? full.slice(0, rcfg.labelMaxChars - 1) + '…'
-        : full;
-
-      // 🌟 Obsidian 摆放：名字画在节点【右侧】、垂直居中于节点、左对齐 ——
-      //   不再居中悬在上方。右置的好处：名字沿着连线的走向排开，节点之间
-      //   天然多出水平空间，观感上就是"每个节点都有自己的位置"。
-      const rScr = Math.max(2, radius[i] * scaleMul[i] * k);
-      const sx = cam.worldToScreenX(x[i]) + rScr + 6;   // 文字【左缘】
-      const sy = cam.worldToScreenY(y[i]);               // 垂直中线
+      //   截断规则收在 displayText 里 —— 布局层算标签宽度时用的是同一个函数，
+      //   两处不一致的话，预留的空间就会与实际画出来的对不上。
+      const text = displayText(full);
 
       // 常态标签走精灵缓存（宽度也一起缓存，不再每帧 measureText）；
       // 悬浮标签直接光栅化 —— 每帧最多一个，不值得为它再开一档缓存。
+      // ⚠ 必须先拿到 w/h —— 下面【水平居中】要用到宽度，不能像原来那样先定位。
       let sprite = null, w, h;
       if (hi) {
         ctx.font = rcfg.labelFont;
@@ -627,46 +724,109 @@
         w = sprite.w; h = sprite.h;
       }
 
-      // 包围盒：x ∈ [sx-pad, sx-pad+w]（文字左缘 sx，pad 留给描边外溢），
-      // y ∈ [sy-h/2, sy+h/2]。按真实包围盒判可见 —— 一半在屏幕里就该画。
-      const bx0 = sx - labelPad, hh = h * 0.5;
+      // 🌟 摆放：名字画在节点【正下方】、水平居中于节点。
+      //   精灵左缘居中到节点圆心（bx0 = cx − w/2）；精灵内部文字左缘在 labelPad 处，
+      //   所以文字自己也正好居中。
+      //
+      // ⚠ 间隙要按【文字】的下缘算，不是按精灵盒 —— 精灵盒上下各留了 labelPad 的
+      //   透明 padding（只为容纳描边外溢），按盒心摆会把文字又推远 4px。
+      //   实测观感：那样每个标签看起来都"飘"在节点下方，认不出属于谁。
+      //   所以文字垂直中线 = 节点下缘 + LABEL_GAP + 文字半高(th)。
+      //   两条绘制路径共用这套坐标：sx = 文字左缘，sy = 文字垂直中线
+      //   （全局 ctx.textBaseline 是 middle，精灵内部同样是 middle，两者一致）。
+      const hh = h * 0.5;
+      const th = hh - labelPad;                       // 文字半高
+      const rScr = Math.max(2, radius[i] * scaleMul[i] * k);
+      const bx0 = cam.worldToScreenX(x[i]) - w * 0.5;
+      const sx = bx0 + labelPad;
+      const sy = cam.worldToScreenY(y[i]) + rScr + LABEL_GAP + th;
+
+      // 包围盒：x ∈ [bx0, bx0+w]，y ∈ [sy-h/2, sy+h/2]。按真实包围盒判可见 ——
+      // 一半在屏幕里就该画。
       const bx1 = bx0 + w;
       if (bx1 < 0 || bx0 > W || sy + hh < 0 || sy - hh > H) return;
 
-      if (force) {
-        // 邻域模式：不查也不标占位格 —— 让位在模式 A 里没有意义
-      } else {
-        // ---- 占位：标满整个包围盒 ----
+      // ---- 🌟 占位胜负判定 ----
+      // 胜 → 标满包围盒、alpha 爬升；败 → 不标不挡，若还有余晖（labelA>0）
+      // 作幽灵画一遍（~70ms 淡出让位）。出屏/空串的 return 不改任何状态 ——
+      // 收尾扫描按 labelWon=0 统一衰减，所以任何离开方式都是渐隐。
+      // ⚠ 初值必须是 true：占位循环只负责把「撞车」置负。写成 `won = force`
+      //   会让常态标签（force=false）一进来就判负，全部不画。
+      let won = true;                      // 邻域模式（force）：不查也不标，恒胜
+      // 🌟 与已画出的标签重叠时的处理，两种策略共用同一套占位判定：
+      //     labelYield = true  → 让位（won=false，不画，靠 L1 淡出）
+      //     labelYield = false → 【变暗】（照画，但 alpha 压到 labelOverlapDim）
+      //   变暗是 Obsidian 式"全都画"和让位式"藏起来"之间的中间档：名字一个不少，
+      //   但先画的高名次节点（hub）保持清晰、被压住的退到背景 —— 否则密密麻麻
+      //   同亮度的字叠在一起完全没法看（实机截图反馈："标签重叠易混淆"）。
+      let dim = 1;
+      let gx0 = 0, gy0 = 0, gx1 = 0, gy1 = 0;
+      if (!force) {
+        // ---- 占位：按【文字本身的包围盒】外扩 halo 宽度来标 ----
+        //
         // 原先只标落点的那【一格】（labelCell = 14），而长标签实际宽上百 px ——
         // 一格占位等于完全没有抑制。密集处的取舍全靠这里。
-        let gx0 = Math.floor(bx0 / cell), gx1 = Math.floor(bx1 / cell);
-        let gy0 = Math.floor((sy - hh) / cell), gy1 = Math.floor((sy + hh) / cell);
+        //
+        // ⚠ 但也【不能】直接标整个精灵盒：精灵盒比文字大一圈（左右各 labelPad、
+        //   上下各 labelPad），按它占位等于凭空多占约 1/3 面积，把本来放得下的
+        //   标签挤掉了。实测（test/label-occlusion-probe.js，300 节点 k=0.6）：
+        //   标精灵盒 → 46 个标签；标文字盒 → 57 个（+24%），而画出来的像素一个
+        //   没变，纯粹是原来少算了。收窄到文字 ± (halo+1) 即可，两个标签的光晕
+        //   贴在一起也不影响阅读。
+        const infl = rcfg.labelHaloWidth + 1;        // 光晕外扩 + 1px 余量（th 已在上面算好）
+        gx0 = Math.floor((sx - infl) / cell);
+        gx1 = Math.floor((sx + w - 2 * labelPad + infl) / cell);
+        gy0 = Math.floor((sy - th - infl) / cell);
+        gy1 = Math.floor((sy + th + infl) / cell);
         if (gx0 < 0) gx0 = 0;
         if (gy0 < 0) gy0 = 0;
         if (gx1 >= cw) gx1 = cw - 1;
         if (gy1 >= ch) gy1 = ch - 1;
         if (gx0 > gx1 || gy0 > gy1) return;
 
-        // 与已经画出来的标签重叠 → 让位（名次高的先画，所以留下的是 hub）
+        // 与已经画出来的标签重叠 → 让位 或 变暗
+        // （H 遍守擂者与名次高的先画，它们保持清晰）
+        let hit = false;
+        outer:
         for (let gy = gy0; gy <= gy1; gy++) {
           const rowBase = gy * cw;
-          for (let gx = gx0; gx <= gx1; gx++) if (occGrid[rowBase + gx]) return;
+          for (let gx = gx0; gx <= gx1; gx++) {
+            if (occGrid[rowBase + gx]) { hit = true; break outer; }
+          }
         }
-        for (let gy = gy0; gy <= gy1; gy++) {
-          const rowBase = gy * cw;
-          for (let gx = gx0; gx <= gx1; gx++) occGrid[rowBase + gx] = 1;
+        if (hit) {
+          if (rcfg.labelYield) won = false;
+          else dim = rcfg.labelOverlapDim;
         }
       }
 
-      labelDrawn++;
+      if (won) {
+        labelWon[i] = 1;
+        const cur = labelA[i];
+        labelA[i] = cur >= 1 ? 1 : Math.min(1, cur + (hi ? RISE_HI : RISE));
+      }
+      const a01 = labelA[i];
+      if (a01 <= 0) return;
+
+      if (won) {
+        if (!force) {
+          for (let gy = gy0; gy <= gy1; gy++) {
+            const rowBase = gy * cw;
+            for (let gx = gx0; gx <= gx1; gx++) occGrid[rowBase + gx] = 1;
+          }
+        }
+        labelDrawn++;                    // 只计胜者 —— 幽灵余晖不算「本帧真正画出」
+      }
+
+      // 🌟 L1×L3：精灵 alpha = 常态系数 × 个体渐变 × 全局淡变 × 重叠变暗
       if (hi) {
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = a01 * labelFadeMul * dim;
         ctx.fillStyle = rcfg.labelColorHi;
         // 先描边再加字（font / strokeStyle / lineWidth / textAlign 由 drawLabels 设好）
         if (rcfg.labelHaloWidth > 0) ctx.strokeText(text, sx, sy);
         ctx.fillText(text, sx, sy);
       } else {
-        ctx.globalAlpha = rcfg.labelAlpha;
+        ctx.globalAlpha = rcfg.labelAlpha * a01 * labelFadeMul * dim;
         // 精灵内部文字左缘在 labelPad 处 → 精灵左缘 = bx0。
         // 贴到设备像素栅格再 blit —— 落在半像素上同样会引入重采样（见 makeLabelSprite）
         ctx.drawImage(sprite.canvas,
@@ -711,6 +871,7 @@
       labelCache.clear();
       nodeList = edgeList = null;
       occGrid = new Uint8Array(0);
+      labelA = labelShown = labelWon = null;
     }
 
     return {

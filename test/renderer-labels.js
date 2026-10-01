@@ -33,6 +33,11 @@ function makeStubCtx(canvas) {
   const calls = {
     fillText: 0, strokeText: 0, drawImage: 0,
     fill: 0, stroke: 0, clearRect: 0, measureText: 0,
+    // L1/L2/L3 断言用：drawImage 的来源精灵画布（同一字符串 = 同一张精灵）
+    // 与调用瞬间的 globalAlpha。数组型计数在 draw() 里清空方式不同。
+    srcs: [], alphas: [],
+    // 绝对摆放断言用：drawImage 的目标矩形（精灵左缘/上缘/宽/高，CSS 像素）
+    dsts: [],
   };
   const ctx = {
     calls,
@@ -52,7 +57,10 @@ function makeStubCtx(canvas) {
     measureText(t) { calls.measureText++; return { width: String(t).length * 7 }; },
     fillText() { calls.fillText++; },
     strokeText() { calls.strokeText++; },
-    drawImage() { calls.drawImage++; },
+    drawImage(src, dx, dy, dw, dh) {
+      calls.drawImage++; calls.srcs.push(src); calls.alphas.push(this.globalAlpha);
+      calls.dsts.push({ dx, dy, dw, dh });
+    },
   };
   return ctx;
 }
@@ -96,6 +104,12 @@ const GFI = sandbox.GFI;
 // （辉光走 spriteCache 与标签的 labelCache 完全独立，对标签逻辑没有任何影响。）
 GFI.config.lod.levels[0].glow = 'hover';
 
+// 🌟 本文件绝大多数用例测的是【占位让位机制】本身（谁占住格子、谁被挤掉、胜者滞回、
+//   幽灵余晖……），所以这里显式把它打开。
+// ⚠ 产品默认是 `labelYield = false`（Obsidian 行为：都画、可重叠），
+//   那条路径由文件末尾的 §11 单独覆盖 —— 不要因为这里设了 true 就以为默认变了。
+GFI.config.render.labelYield = true;
+
 // ---------------------------------------------------------------------------
 // 断言工具
 // ---------------------------------------------------------------------------
@@ -111,8 +125,9 @@ function section(t) { console.log(`\n\x1b[36m━━━ ${t} ━━━\x1b[0m`); 
 // 场景搭建
 // ---------------------------------------------------------------------------
 // 视口 400×400、k=1、相机在原点 → 屏幕坐标 = 世界坐标 + 200。
-// 🌟 标签是 Obsidian 摆放：文字【左对齐】画在节点右侧 6px、垂直居中于节点。
-//    place(i, sx, sy) 的语义因此是【文字左缘、垂直中线】——不是节点圆心。
+// 🌟 标签摆放：文字画在节点【正下方】、水平居中于节点，间隙 6px（renderer 的 LABEL_GAP）。
+//    place(i, sx, sy) 的语义因此是【文字左缘、文字垂直中线】——不是节点圆心，
+//    所以它要按摆法【反解】出节点圆心（见下面 place 的实现）。
 // 节点度数 0 → radius = clamp(radiusBase, min, max) × nodeSize = 5。
 const SCREEN_OFF = VW / 2;
 
@@ -139,17 +154,26 @@ function makeScene(labels) {
   const renderer = GFI.Renderer.create(canvas, D, cam);
   renderer.resize(VW, VH, DPR);
   // 直接摆到指定屏幕坐标上（sx = 文字左缘，sy = 文字垂直中线）
+  //   这是 renderer.drawOne 摆放公式的【逆运算】，改摆法必须同步改这里，否则
+  //   所有几何断言会静默算错（不是报错，是算出一个错的期望值）。
   return {
     D, cam, renderer, canvas,
     ctx: canvas.getContext('2d'),
     place(i, sx, sy) {
       const rScr = Math.max(2, D.radius[i] * D.scaleMul[i] * cam.k);
-      D.x[i] = screenToWorldX(sx - 6 - rScr);   // 节点圆心在文字左缘左侧 6+r 处
-      D.y[i] = screenToWorldY(sy);              // 文字中线 == 节点圆心 y
+      const w = labelW(D.label[i]);
+      // 正下方 + 水平居中：文字水平中点 == 节点圆心 x；
+      // 节点圆心在文字上方 (文字半高 + 间隙 + 节点半径)。
+      // ⚠ 间隙从【文字】下缘算，不是精灵盒下缘 —— 盒子上下各留了 PAD 的透明 padding。
+      D.x[i] = screenToWorldX(sx - PAD + w * 0.5);
+      D.y[i] = screenToWorldY(sy - (BOX_H * 0.5 - PAD) - 3 - rScr);
     },
     draw(view) {
       const c = canvas.getContext('2d');
-      for (const k in c.calls) c.calls[k] = 0;
+      for (const k in c.calls) {
+        if (Array.isArray(c.calls[k])) c.calls[k].length = 0;
+        else c.calls[k] = 0;
+      }
       return renderer.render(Object.assign(
         { hoverIdx: -1, selectedIdx: -1, lod: 0, labelsOn: true }, view || {}));
     },
@@ -331,6 +355,226 @@ section('6. 日记标签默认不显示（config.render.labelJournal）');
   const stHover = S.draw({ hoverIdx: 1 });
   check('悬浮日记节点时名字仍显示（模式 A 不受开关影响）', stHover.labelN === 1,
     `labelN=${stHover.labelN}（期望 1，悬浮的那个）`);
+})();
+
+// ===========================================================================
+section('7. 标签淡入淡出 —— 让位不再"啪"地掐断（L1）');
+// ===========================================================================
+// 胜者 alpha 每帧爬升 RISE(1/6)，败者/未遍历者每帧衰减 FALL(1/4)。
+// 刚起步的标签只有 1/6 余晖 → 恰好多画 1 帧；已稳定的标签 1.0 → 4 帧。
+(function testLabelFade() {
+  const S = makeScene(['aaaa', 'bbbb']);
+  S.place(0, 100, 200);
+  S.place(1, 130, 200);            // 重叠：A（index 0）先画先占
+
+  const c = S.ctx;
+  const st1 = S.draw();
+  check('第一帧：胜者 A 画出，败者 B 被抑制',
+    st1.labelN === 1 && c.calls.drawImage === 1,
+    `labelN=${st1.labelN} drawImage=${c.calls.drawImage}`);
+
+  // 让 B 挪开 → 两帧不重叠，两个都胜出、alpha 各自爬升
+  S.place(1, 300, 200);
+  S.draw();
+  const st3 = S.draw();
+  check('分开后两个都画出', st3.labelN === 2, `labelN=${st3.labelN}`);
+
+  // 挪回重叠 → B 判负，但仍有 2/6 的余晖 → 幽灵补画一帧（drawImage 计 2、
+  // labelN 只计胜者 1）—— 这就是「让位不掐断」的全部含义
+  S.place(1, 130, 200);
+  const st4 = S.draw();
+  check('回归重叠：B 以幽灵余晖多画一帧',
+    st4.labelN === 1 && c.calls.drawImage === 2,
+    `labelN=${st4.labelN} drawImage=${c.calls.drawImage}（期望 1 / 2）`);
+
+  // 余晖按 FALL=1/4 逐帧衰减直至归零：B 退场时已爬到 2/6，需要两帧淡完。
+  // 关键不是"几帧"，而是【渐变而非掐断】—— 所以断言帧数落在 (1, 6) 开区间
+  // 且幽灵 alpha 单调下降。
+  const alphas = [];
+  let framesToVanish = 1;    // 上面 st4 那一帧的幽灵已经画过，从 1 起算
+  for (let f = 0; f < 6; f++) {
+    const st = S.draw();
+    if (c.calls.drawImage >= 2) {
+      framesToVanish++;
+      alphas.push(c.calls.alphas[1]);      // [0] 是胜者 A，[1] 才是 B 的幽灵
+    } else {
+      check('余晖完全消失后只剩胜者一个', st.labelN === 1 && c.calls.drawImage === 1,
+        `labelN=${st.labelN} drawImage=${c.calls.drawImage}`);
+      break;
+    }
+  }
+  let monotone = true;
+  for (let i = 1; i < alphas.length; i++) if (alphas[i] >= alphas[i - 1]) monotone = false;
+  check('余晖渐变收敛（1 < 帧数 < 6，alpha 单调降）',
+    framesToVanish > 1 && framesToVanish < 6 && monotone,
+    `${framesToVanish} 帧淡完 [${alphas.map((x) => x.toFixed(3)).join(' → ')}]`);
+})();
+
+// ===========================================================================
+section('8. 胜者滞回 —— 让位胜负不许帧间翻转（L2）');
+// ===========================================================================
+// 占位格每帧清零，胜负由遍历顺序决定；顺序里的空间序随漂移/平移变化，
+// 于是竞争区标签一闪一闪。修法是上一帧的胜者先画先占（H 遍）。
+(function testLabelHysteresis() {
+  const S = makeScene(['aaaa', 'bbbb']);
+  const D = S.D, c = S.ctx;
+
+  // 人为设定名次：B 的 rank 更小（=度数更高）→ 无滞回时 N 遍里 B 必胜
+  D.labelRank[0] = 200;
+  D.labelRank[1] = 0;
+  S.place(0, 100, 200);
+  S.place(1, 130, 200);            // 重叠
+
+  S.draw();
+  const bSprite = c.calls.srcs[c.calls.srcs.length - 1];
+  check('首帧按名次：高名次 B 占位（A 让位）', c.calls.drawImage >= 1,
+    `drawImage=${c.calls.drawImage}`);
+
+  // 翻转名次：A 变成 rank 0。若无滞回，N 遍里 A 会在第一个档位把格子抢走
+  // → 胜者从 B 翻到 A（视觉上就是闪一下）。
+  D.labelRank[0] = 0;
+  D.labelRank[1] = 200;
+  S.draw();
+  const winner2 = c.calls.srcs[0];
+  check('名次反转后：胜者仍是上一帧的 B（滞回守擂）',
+    winner2 === bSprite, winner2 === bSprite ? '同一张精灵' : '胜者被翻转了');
+
+  // 相机突变（k 变化 > 10%）必须作废滞回 —— 否则陈旧胜者会挂在失效位置上
+  S.cam.k = 1.5;
+  S.draw();
+  const winner3 = c.calls.srcs[0];
+  check('相机突变后滞回作废：A 按新名次夺回格子',
+    winner3 !== bSprite, winner3 !== bSprite ? '已重排' : '仍挂着陈旧胜者');
+  S.cam.k = 1;
+})();
+
+// ===========================================================================
+section('9. 全局淡变系数 —— labelsOn 不再瞬切（L3）');
+// ===========================================================================
+(function testGlobalFade() {
+  const S1 = makeScene(['aaaa']);
+  S1.place(0, 100, 200);
+  const c1 = S1.ctx;
+  const a = [];
+  for (let f = 0; f < 8; f++) { S1.draw({ labelFade: 1 }); a.push(c1.calls.alphas[c1.calls.alphas.length - 1]); }
+  const full = a[a.length - 1];
+
+  const S2 = makeScene(['aaaa']);
+  S2.place(0, 100, 200);
+  const c2 = S2.ctx;
+  const b = [];
+  for (let f = 0; f < 8; f++) { S2.draw({ labelFade: 0.5 }); b.push(c2.calls.alphas[c2.calls.alphas.length - 1]); }
+  const half = b[b.length - 1];
+
+  check('alpha 逐帧爬升（不是一步到位）', a[0] < a[3] && a[3] < a[7],
+    `帧 1/4/8 = ${a[0].toFixed(3)} / ${a[3].toFixed(3)} / ${a[7].toFixed(3)}`);
+  check('全局系数线性缩放 alpha', Math.abs(half * 2 - full) < 1e-4,
+    `全亮 ${full.toFixed(4)} vs 半亮 ${half.toFixed(4)}`);
+
+  const S3 = makeScene(['aaaa']);
+  S3.place(0, 100, 200);
+  const st0 = S3.draw({ labelFade: 0 });
+  check('labelFade = 0：整层跳过（一个标签都不画）',
+    st0.labelN === 0 && S3.ctx.calls.drawImage === 0,
+    `labelN=${st0.labelN} drawImage=${S3.ctx.calls.drawImage}`);
+})();
+
+// ===========================================================================
+section('10. 标签绝对摆放 —— 节点正下方、水平居中');
+// ===========================================================================
+// ⚠ 上面所有几何断言都建立在 place() 之上，而 place() 是摆放公式的【逆运算】：
+//   摆法整体平移时【相对】几何不变，断言照样全绿 —— 实测把标签改到节点【上方】，
+//   35 项依然全过。所以摆法本身必须单独钉一条【绝对坐标】的断言，不能靠 place()。
+(function testLabelPlacement() {
+  const S = makeScene(['abcd']);
+  const nodeX = 200, nodeY = 150;
+  // 直接摆节点，【不】经过 place() —— 那个函数会按摆法反解，把摆法错误掩盖掉
+  S.D.x[0] = screenToWorldX(nodeX);
+  S.D.y[0] = screenToWorldY(nodeY);
+  const st = S.draw();
+
+  check('画出了一个标签', st.labelN === 1, `labelN=${st.labelN}`);
+  const d = S.ctx.calls.dsts[0];
+  if (!d) { check('拿到了 drawImage 的目标矩形', false, '没有 drawImage'); return; }
+
+  const rScr = Math.max(2, S.D.radius[0] * S.D.scaleMul[0] * S.cam.k);
+  const w = labelW('abcd');
+  // blit 的目标矩形会按设备像素取整（dpr=2 → 舍入误差 ≤ 0.25px），留 0.51 余量
+  const TOL = 0.51;
+
+  check('精灵水平居中于节点（左缘 + 宽/2 == 节点 x）',
+    Math.abs(d.dx + d.dw / 2 - nodeX) <= TOL,
+    `中心 ${(d.dx + d.dw / 2).toFixed(2)} vs 节点 ${nodeX}`);
+  // 精灵上缘 = 节点下缘 + 间隙 + (盒半高 − 文字半高)，即【文字】上缘正好在 节点下缘+3
+  const boxTop = nodeY + rScr + 3 + (BOX_H * 0.5 - PAD) - BOX_H * 0.5;
+  check('文字上缘 == 节点下缘 + 3（间隙按文字算，不按精灵盒）',
+    Math.abs(d.dy - boxTop) <= TOL,
+    `上缘 ${d.dy.toFixed(2)} vs 期望 ${boxTop.toFixed(2)}`);
+  check('精灵宽度 == 文字宽 + 两侧 pad', Math.abs(d.dw - w) <= TOL, `${d.dw} vs ${w}`);
+  check('精灵高度 == 标签盒高', Math.abs(d.dh - BOX_H) <= TOL, `${d.dh} vs ${BOX_H}`);
+})();
+
+// ===========================================================================
+section('11. labelYield = false（Obsidian 默认）—— 每个节点都画名字，不互相让位');
+// ===========================================================================
+// 查证：Obsidian 官方（论坛 Bug graveyard 帖「Graph view - titles overlap」）明确
+// 拒绝做标签碰撞 ——「想读文字就放大；只想看节点位置就缩小，文字会消失」。
+// 其 forceCollide 也只按节点半径算，标签不参与布局。所以它的做法就是：全画、允许
+// 重叠，密度只靠缩放淡变控制（main.js 的 labelFade）。
+// 本文件开头把 labelYield 设成了 true 以便覆盖让位机制，这一节把它切回产品默认值。
+(function testNoYield() {
+  const prev = GFI.config.render.labelYield;
+
+  // ---- 六个标签全叠在同一点 ----
+  GFI.config.render.labelYield = false;
+  const S = makeScene(['aaa', 'bbb', 'ccc', 'ddd', 'eee', 'fff']);
+  for (let i = 0; i < 6; i++) S.place(i, 120, 120);
+  const stOff = S.draw();
+  check('全部重叠时仍画出全部 6 个（不让位）', stOff.labelN === 6, `labelN=${stOff.labelN}`);
+
+  // ---- 对照：同一场景打开让位必须只剩一个，证明上一条不是恒真 ----
+  GFI.config.render.labelYield = true;
+  const S2 = makeScene(['aaa', 'bbb', 'ccc', 'ddd', 'eee', 'fff']);
+  for (let i = 0; i < 6; i++) S2.place(i, 120, 120);
+  const stOn = S2.draw();
+  check('同场景开启让位后只剩 1 个（对照，防上一条假通过）', stOn.labelN === 1, `labelN=${stOn.labelN}`);
+
+  // ---- force 路径不能顺手绕过其它过滤：日记开关必须照样生效 ----
+  GFI.config.render.labelYield = false;
+  const S3 = makeScene(['普通页', { label: '2026-09-28 Mon', kind: 'journal' }]);
+  S3.place(0, 80, 200);
+  S3.place(1, 300, 200);
+  const stJ = S3.draw();
+  check('关掉让位后日记标签仍被跳过（force 只跳过占位，不跳过过滤）', stJ.labelN === 1,
+    `labelN=${stJ.labelN}（期望 1，只有页面）`);
+
+  // ---- 重叠的标签必须【变暗】（这是"重叠易混淆"的对策：名字不丢，但退到背景）----
+  GFI.config.render.labelYield = false;
+  const S4 = makeScene(['aaa', 'bbb']);
+  S4.place(0, 120, 120);
+  S4.place(1, 120, 120);          // 完全重叠
+  const stD = S4.draw();
+  const al = S4.ctx.calls.alphas;
+  check('重叠的两个都画出来了', stD.labelN === 2, `labelN=${stD.labelN}`);
+  check('后画的那个被压暗（alpha 明显更低）',
+    al.length === 2 && al[1] < al[0] * 0.99,
+    `alphas=${al.map((v) => v.toFixed(3)).join(' / ')}`);
+  check('压暗倍率 = config.render.labelOverlapDim',
+    al.length === 2 && Math.abs(al[1] / Math.max(1e-9, al[0]) - GFI.config.render.labelOverlapDim) < 0.02,
+    `比值 ${(al[1] / Math.max(1e-9, al[0])).toFixed(3)} vs ${GFI.config.render.labelOverlapDim}`);
+
+  // ---- 稀疏场景两种策略结果必须一致 ----
+  const sparse = (yieldOn) => {
+    GFI.config.render.labelYield = yieldOn;
+    const Sx = makeScene(['aaa', 'bbb']);
+    Sx.place(0, 60, 60);
+    Sx.place(1, 320, 320);
+    return Sx.draw().labelN;
+  };
+  check('稀疏场景两种策略一致（都是 2）', sparse(false) === 2 && sparse(true) === 2,
+    `off=${sparse(false)} on=${sparse(true)}`);
+
+  GFI.config.render.labelYield = prev;
 })();
 
 // ===========================================================================

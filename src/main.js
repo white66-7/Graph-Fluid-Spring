@@ -27,7 +27,8 @@
     let inter = null;
     let timeline = null;
 
-    return { D, sim, fx, renderer, get inter() { return inter; }, set inter(v) { inter = v; },
+    return { D, sim, fx, renderer,
+             get inter() { return inter; }, set inter(v) { inter = v; },
              get timeline() { return timeline; }, set timeline(v) { timeline = v; } };
   }
 
@@ -65,6 +66,7 @@
     let errorCount = 0;
     let frameCount = 0;
     let labelsOn = false;
+    let labelFade = 0;              // 🌟 L3：标签层全局 alpha 补间（0..1）
     let nativeMode = !!cfg.useNativeGraph;
     let lodLevel = 1;
     let lodForced = -1;
@@ -207,7 +209,7 @@
     // ---- 交互 ----
     function attachInteraction() {
       if (P.inter) P.inter.destroy();
-      P.inter = GFI.Interaction.create(overlay.canvas, P.D, cam, P.sim, P.fx, {
+      P.inter = GFI.Interaction.create(overlay.canvas, P.D, cam, P.sim, {
         onNodeActivate(node) {
           if (opts.onNodeActivate) opts.onNodeActivate(node);
           emitter.emit('nodeactivate', node);
@@ -362,14 +364,6 @@
           const awake = P.sim.isAwake();
           if (awake) P.sim.tick(DT);
           P.fx.update(DT);
-          // ⚠ handoff 必须【在模拟睡着时也跑】。
-          //   它是解析解 + 直接写 D.x/D.y，不需要模拟推进。而 settle 非空会让
-          //   fx.anyActive() 恒真 —— 一旦这里被 awake 挡住，settle 就永远结束不了，
-          //   下面第 7 步的 busy 判定就永远为真，空闲停机（本文件开头第 2 条铁律）
-          //   彻底失效，循环会以 60fps 永久空转。
-          //   最容易撞上的路径：甩掷【零度节点】—— 那条路径刻意不 reheat
-          //   （见 interaction.js 松手处），所以模拟全程都是睡着的。
-          P.fx.applyHandoff(DT);
           if (P.timeline) P.timeline.update(DT, vhWorld);
           acc -= DT;
           substeps++;
@@ -377,10 +371,13 @@
         // 丢弃积压，防止死亡螺旋
         if (substeps >= maxSub) acc = 0;
 
-        // 模拟睡着时 chargeGrid 不会自己重建，而 handoff 正在写坐标。
-        // 剔除与命中测试都复用这张网格，不补这一下的话，被甩出的节点会以
-        // 【旧网格位置】参与剔除 —— 飞出余量后就地消失、也点不中。
-        if (!P.sim.isAwake() && P.fx.settleActive) P.sim.rebuildGrid();
+        // 模拟睡着时 chargeGrid 不会自己重建，而拖拽是【唯一】在睡眠状态下直接写
+        // 节点坐标的路径：sim.pin() 是同步写 x/y 的，且零度节点刻意不 reheat、
+        // 不抬 alphaTarget（见 interaction.js onPointerDown）→ 模拟全程睡着。
+        // 剔除（renderer.setGrid(sim.grid)）与命中测试都复用这张网格，不补这一下
+        // 的话，被拖的节点会以【入睡时的旧位置】参与剔除 —— 拖出余量后就地消失、
+        // 也点不中。只在拖拽进行中补，每帧一次 O(n)，睡眠期间零成本。
+        if (!P.sim.isAwake() && P.inter && P.inter.dragNode >= 0) P.sim.rebuildGrid();
 
         // ---- 视野缓动（每帧一次，不是每 substep —— 它是时间驱动的）----
         stepCamAnim(elapsed / 1000);
@@ -399,13 +396,31 @@
           }
         }
 
-        // ---- 标签滞回（阈值相对于 fitView 缩放）----
+        // ---- 标签显隐 —— 🌟 随缩放【连续】淡变（Obsidian 的 text fade threshold）----
+        //
+        // 原来是二元滞回（k ≥ showK 整层开 / k < hideK 整层关）再叠一层时间补间。
+        // 但 `render.labelYield = false`（默认，Obsidian 行为）关掉了标签之间的重叠
+        // 让位之后，缩放淡变就成了【唯一】的密度控制手段 —— 视口内节点一多，标签
+        // 必然互相压住，只能靠「缩小就别读字」来取舍。
+        // 所以改成随 k 连续过渡：缩小过程中标签是渐渐淡掉的，而不是到某一帧整层啪地消失。
+        // 阈值仍相对于 fitView 缩放（fitK），换一张图不用重调。
         const k = cam.k;
         const rc = cfg.render;
         const showK = fitK > 0 ? fitK * rc.labelShowScaleRatio : rc.labelFallbackShow;
         const hideK = fitK > 0 ? fitK * rc.labelHideScaleRatio : rc.labelFallbackHide;
-        if (!labelsOn && k >= showK) labelsOn = true;
-        else if (labelsOn && k < hideK) labelsOn = false;
+        // k 在 [hideK, showK] 之间线性映射 0→1，两端外截断
+        const t = (k - hideK) / Math.max(1e-9, showK - hideK);
+        const want = t <= 0 ? 0 : (t >= 1 ? 1 : t);
+
+        // 🌟 L3：在连续目标之上再叠一层时间补间（~90ms/10%）——
+        //   k 连续变化时它让淡变更顺；相机瞬变（fitView 跳转）时给出平滑过渡。
+        labelFade += (want - labelFade) * Math.min(1, elapsed * 0.011);
+        if (labelFade < 0.001) labelFade = 0;
+        else if (labelFade > 0.999) labelFade = 1;
+        // ⚠ labelsOn 必须与【实际 alpha】一致（而不是 want）：want 是个极小的正数时
+        //   标签几乎不可见，却仍会让渲染层整层跑一遍 drawLabels（含精灵创建）。
+        //   这也是 renderer 里「labelFade = 0 时整层跳过」那条断言的入口条件。
+        labelsOn = labelFade > 0;
 
         // ---- 绘制 ----
         const stats = renderer.render({
@@ -413,6 +428,7 @@
           selectedIdx: P.inter ? P.inter.selectedIdx : -1,
           lod: lodLevel,
           labelsOn,
+          labelFade,
         });
         lastStats = stats;
 
