@@ -1,13 +1,4 @@
-/*
- * GFI.Camera — 世界↔屏幕变换、平移缩放
- * ===========================================================================
- * 硬刹：平移是【直接赋值】，松手时什么都不做 —— 零惯性、零漂移。
- *       （顺带一提，Logseq 原生图谱本来也是这样，所以这不是什么增强。）
- *
- * ⚠ 结构性约束：这个模块【不暴露任何 Effects / Timeline 能调用的动画方法】。
- *   激波必须往模拟里注入速度，绝不能靠改相机来伪装。让"缩放"和"波"
- *   在 API 层面就不可能混淆，是防止退化成 v1 那套 Matrix 劫持的最有效手段。
- */
+// GFI.Camera — 世界屏幕间变换、平移缩放
 (function (GFI) {
   'use strict';
   if (GFI.Camera) return;
@@ -23,7 +14,7 @@
       H: height || 1,
       halfW: (width || 1) * 0.5,
       halfH: (height || 1) * 0.5,
-      // 拖动平移的起点（屏幕坐标 + 起始相机位置）
+      // 拖动平移的起点
       _dragX: 0, _dragY: 0, _camX0: 0, _camY0: 0, _dragging: false,
     };
 
@@ -42,9 +33,7 @@
     cam.worldToScreenX = (wx) => (wx - cam.x) * cam.k + cam.halfW;
     cam.worldToScreenY = (wy) => (wy - cam.y) * cam.k + cam.halfH;
 
-    // -----------------------------------------------------------------------
-    // 平移（硬刹）
-    // -----------------------------------------------------------------------
+    // 平移
     cam.beginPan = function beginPan(sx, sy) {
       cam._dragging = true;
       cam._dragX = sx; cam._dragY = sy;
@@ -58,13 +47,10 @@
     };
 
     cam.endPan = function endPan() {
-      // 硬刹：这里【故意什么都不做】。没有惯性，没有衰减，没有目标点。
       cam._dragging = false;
     };
 
-    // -----------------------------------------------------------------------
-    // 缩放（锚定光标下的世界点）
-    // -----------------------------------------------------------------------
+    // 缩放
     cam.zoomAt = function zoomAt(sx, sy, factor) {
       const wx = cam.screenToWorldX(sx);
       const wy = cam.screenToWorldY(sy);
@@ -82,9 +68,7 @@
       return cam.zoomAt(sx, sy, factor);
     };
 
-    // -----------------------------------------------------------------------
     // 视口适配
-    // -----------------------------------------------------------------------
     cam.fitBounds = function fitBounds(b, padding) {
       const pad = padding === undefined ? cfg.fitPadding : padding;
       const w = Math.max(1, b.maxX - b.minX);
@@ -96,7 +80,7 @@
       cam.y = (b.minY + b.maxY) * 0.5;
     };
 
-    // 视口在世界空间的矩形，外扩 margin（用于剔除；节点本身有半径，所以要外扩）
+    // margin 兼容在边缘的节点
     cam.visibleRect = function visibleRect(margin, out) {
       out = out || {};
       const hw = cam.halfW / cam.k + margin;

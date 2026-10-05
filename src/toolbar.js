@@ -1,17 +1,4 @@
-/*
- * GFI.Toolbar — 紧凑控件栏
- * ===========================================================================
- * 只保留四个东西：
- *   ▶/⏸  播放暂停 | 日期 + 时间滑块 | 类型开关(页面/标签/日记) | ⤢ 适配视野
- *
- * 已移除（按需求精简）：倍速切换、循环开关、回到现在、切换原生图谱。
- *   倍速 → 设置面板的「基础演变周期」
- *   回到现在 → 把滑块拖到最右即可
- *   原生图谱 → 插件设置里的「使用原生图谱」开关，或 __GFI__.native(true)
- *
- * 用原生 DOM 而不是 React：我们在宿主 document 里，拿不到插件 iframe 的 React 实例，
- * 而且这点 UI 用原生 DOM 更简单、更容易精确销毁。
- */
+// GFI.Toolbar — 紧凑控件栏
 (function (GFI) {
   'use strict';
   if (GFI.Toolbar) return;
@@ -53,7 +40,7 @@
       return b;
     }
 
-    // ---- 时间旅行组（无时间戳时整组收起）----
+    // -- 时间旅行组 --
     const timeWrap = el('div', 'gfi-time');
 
     const playBtn = doc.createElement('button');
@@ -81,8 +68,6 @@
     made.push(slider);
 
     // ---- 类型开关 ----
-    // 用短文字而不是图标：这三个概念没有公认的图标，硬凑反而难认。
-    // 二字标签已经是"最低限度文字"的极限了。
     el('div', 'gfi-sep');
     const KINDS = [
       { idx: 0, label: '页面' },
@@ -98,7 +83,7 @@
       return b;
     });
 
-    // ---- 适配视野 ----
+    // ---- 视野适配 ----
     el('div', 'gfi-sep');
     const fitBtn = button('适配视野', SVG.fit);
 
@@ -129,7 +114,7 @@
     slider.addEventListener('pointercancel', endScrub);
     slider.addEventListener('change', endScrub);
 
-    // 阻止事件冒泡到 #global-graph，避免被 Logseq 自己的处理器捡走
+    // 阻止冒泡至 #global-graph
     ['pointerdown', 'pointerup', 'click', 'wheel'].forEach((t) => {
       host.addEventListener(t, (e) => e.stopPropagation());
     });
