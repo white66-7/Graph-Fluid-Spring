@@ -1,6 +1,5 @@
 /*
- * GFI.Data — 原始数据 → 定型数组 (SoA) + CSR 邻接
- * ===========================================================================
+ * 原始数据到定型数组 (SoA) + CSR 邻接
  * 一切数组只在 build() 时分配一次，之后整个生命周期零分配。
  * 热循环里不允许出现对象字面量、闭包、forEach。
  *
@@ -25,11 +24,8 @@
     return i < 0 ? 0 : i;
   }
 
-  // -------------------------------------------------------------------------
-  // 种子布局：黄金角螺旋（phyllotaxis）
-  // 作用：给模拟一个不重叠、无聚集的初值。若全部从原点出发，
-  //       1/d² 斥力会产生巨大冲量直接发散成 NaN。
-  // -------------------------------------------------------------------------
+
+  // 黄金角螺旋节点初始位置
   function seedPositions(data) {
     const { n, x, y, deg } = data;
     const golden = Math.PI * (3 - Math.sqrt(5));
@@ -42,16 +38,14 @@
       x[i] = r * Math.cos(a);
       y[i] = r * Math.sin(a);
     }
-    // 一点点确定性噪声，打破完美螺旋的对称性（否则退化情形下会锁在对称态）
+    // 扰动防止完全对称
     for (let i = 0; i < n; i++) {
       x[i] += (hash11(i * 2) - 0.5) * 8;
       y[i] += (hash11(i * 2 + 1) - 0.5) * 8;
     }
   }
 
-  // -------------------------------------------------------------------------
   // build
-  // -------------------------------------------------------------------------
   /**
    * @param {Array<{id,label,kind,createdAt?,color?,degree?}>} rawNodes
    * @param {Array<{source,target,label?}>} rawLinks
@@ -70,6 +64,7 @@
     const nodes = [];
     for (let i = 0; i < rawNodes.length; i++) {
       const nd = rawNodes[i];
+      // 三层检测对应
       if (!nd || nd.id === undefined || nd.id === null) continue;
       const id = String(nd.id);
       if (indexById.has(id)) continue;
