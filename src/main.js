@@ -324,9 +324,7 @@
       wake();
     }
 
-    // =======================================================================
     // 主循环
-    // =======================================================================
     function frame(now) {
       if (!running) return;
       rafId = GFI.topWin.requestAnimationFrame(frame);
@@ -363,12 +361,23 @@
         while (acc >= DT && substeps < maxSub) {
           const awake = P.sim.isAwake();
           if (awake) P.sim.tick(DT);
-          P.fx.update(DT);
           if (P.timeline) P.timeline.update(DT, vhWorld);
           acc -= DT;
           substeps++;
         }
-        // 丢弃积压，防止死亡螺旋
+
+        // 🌟 特效推进必须是【每渲染帧一次】，不能放在上面的物理子步循环里。
+        //
+        //   为什么：Obsidian 的节点淡入是 `fadeAlpha = uZ(fadeAlpha, 1)` —— 每【渲染帧】
+        //   一次（在 rAF 的 renderCallback 里）。我们原先按【物理子步】推：
+        //     · 高刷屏（120Hz）：elapsed 8.3ms < DT，一半的帧一个子步都没有，
+        //       淡入直接停顿 → 一卡一卡地出现；
+        //     · 掉帧（33ms）：一帧跑 2 个子步，alpha 连跳两级 → 一次跳 +0.29。
+        //   实测这个"跳"就是「节点出现得突然」的来源之一（见 test/…probe）。
+        //   传真实 elapsed 而不是 DT，弹簧/淡出/激波那几条【本来就是 dt 累计】的
+        //   路径行为不变；只有 Obsidian 淡入这条（按调用次数递推）被修正为每帧一步。
+        P.fx.update(Math.min(cfg.runtime.maxFrameMs, Math.max(0, elapsed)) / 1000);
+  
         if (substeps >= maxSub) acc = 0;
 
         // 模拟睡着时 chargeGrid 不会自己重建，而拖拽是【唯一】在睡眠状态下直接写
@@ -765,12 +774,30 @@
         cutoff: tl.cutoff === Infinity ? 'Infinity' : tl.cutoff,
         进度: +tl.progress().toFixed(4),
         范围: r ? { min: r.min, max: r.max, durationMs: r.duration, 跨度天: Math.round(r.duration / 86400000) } : null,
+        // 🌟 节奏（2026-10-07 按秩推进）——「全程多少秒」现在是算出来的，不是设定值
+        有时间戳节点: tl.pacedCount,
+        设定节奏_每秒: GFI.config.timeline.revealRate,
+        诞生速率_每秒: tl.rate ? +tl.rate.toFixed(2) : 0,
+        实际全程秒: tl.playDurationSec ? +tl.playDurationSec.toFixed(1) : 0,
+        // 全程太久时给个可执行的提示（护栏已经全部删掉，节奏完全由用户定，
+        // 所以这里只【说】不动手 —— 「演变节奏」就是那个旋钮）
+        全程提示: tl.playDurationSec > 180
+          ? `全程 ${(tl.playDurationSec / 60).toFixed(1)} 分钟 —— 嫌久就把「演变节奏」调大（当前 ${GFI.config.timeline.revealRate}/秒）`
+          : undefined,
+        // 「密度」的正确度量：同一时刻有几个节点正在做出生动画。
+        //   速率 × 单次动画时长。调「演变节奏」或 pop.mode/maxDuration 都会动它。
+        出生缓动模式: GFI.config.pop.mode,
+        单次出生动画秒: P.fx && P.fx.popDuration ? +P.fx.popDuration().toFixed(3) : 0,
+        同时出生动画数: (P.fx && P.fx.popDuration && tl.rate)
+          ? +(tl.rate * P.fx.popDuration()).toFixed(2) : 0,
+        游标rank: tl.rank ? +tl.rank.toFixed(1) : 0,
+        待揭示队列: (() => { let c = 0; for (let i = 0; i < P.D.n; i++) if (P.D.wantVisible[i] && !P.D.visible[i]) c++; return c; })(),
         可见: vis, 目标可见: want, 淡出中: fading, 弹出中: popping, 总节点: P.D.n,
       };
       console.log('%c[GFI] 时间轴状态 ' + JSON.stringify(out, null, 2), 'color:#0aa;font-family:monospace');
       if (!r) {
         console.error('%c✘ tl.range 为 null —— setPlaying() 会直接 return，播放完全不会启动。' +
-          '原因通常是所有节点的 createdAt 相同或全部缺失。', 'color:#c00;font-weight:bold');
+          '原因通常是所有节点的 createdAt 完全相同，或全部缺失。', 'color:#c00;font-weight:bold');
       }
       return out;
     }

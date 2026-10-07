@@ -183,7 +183,12 @@
         const isoI = deg[i] === 0;
 
         const xi = x[i], yi = y[i];
-        const ci = Math.abs(charge[i]);
+        // 🌟 电荷按 simWeight 加权：新节点出生时 simWeight 从 0 渐入，
+        //   它的斥力也就跟着渐入，而不是落在邻居质心上就用满幅把人家顶开。
+        //   ⚠ 顺带补上一个既有的对称性缺口：淡出时 simWeight 已经在降，但之前
+        //     斥力只看二值的 activeMask —— 节点一直满强度排斥到最后一帧才突变。
+        const swi = simWeight[i];
+        const ci = Math.abs(charge[i]) * swi;
 
         // 按节点精确位置算索引区间 —— 不做固定 NxN 扫描，避免 off-by-one 丢力
         let cx0 = ((xi - R - gMinX) * inv) | 0;
@@ -217,7 +222,8 @@
               const dd = d < minD ? minD : d;
 
               // 用平均电荷，避免 i、j 电荷不等时失去对称性
-              const cj = Math.abs(charge[j]);
+              const swj = simWeight[j];
+              const cj = Math.abs(charge[j]) * swj;
               const cAvg = (ci + cj) * 0.5;
 
               // 三种力律，均匀背景下的净斥力（∫(K/r^p)·2πr·dr）：
@@ -235,6 +241,7 @@
               }
 
               // 斥力：i 被推离 j，j 被推离 i（用单位向量，力律只管幅值）
+
               const ux = dx / d, uy = dy / d;
               axi -= ux * mag;
               ayi -= uy * mag;

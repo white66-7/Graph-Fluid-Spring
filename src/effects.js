@@ -33,11 +33,20 @@
     const n = D.n;
     const cfg = GFI.config;
 
+    // Obsidian 缓动常量 —— 照抄实测值，别凭手感调（要调请先重测 app.js）
+    const OBS_KEEP = 0.9;      // uZ 的默认系数 n
+    const OBS_DONE = 0.99;     // 收尾阈值（0.9^n<0.01 ⇒ 44 帧 ≈ 730ms）
+
+
     // -----------------------------------------------------------------------
     // (a) pop-out 弹簧
     //   S(t) = 1 + A·e^(−ζω₀t)·sin(ω_d t),   ω_d = ω₀√(1−ζ²)
     // -----------------------------------------------------------------------
     function popDuration() {
+      if (cfg.pop.mode === 'obsidian') {
+        // 缓动收尾帧数：OBS_KEEP^n <= 1-OBS_DONE ⇒ n = ln(1-OBS_DONE)/ln(OBS_KEEP)
+        return Math.log(1 - OBS_DONE) / Math.log(OBS_KEEP) / 60;   // ≈ 0.729 秒
+      }
       const { amp, omega, zeta } = cfg.pop;
       const decay = Math.max(0.0001, zeta * omega);
       const t = Math.log(Math.max(1.01, amp / 0.01)) / decay;
@@ -87,12 +96,19 @@
 
       if (D.popT[i] !== D.popT[i]) popList[popN++] = i;
       D.popT[i] = -Math.max(0, delay || 0);
-      D.popDur[i] = popDuration();
+      // ⚠ popDur 是「这个节点在活跃列表里待多久」，不是「动画多长」。
+      //   受力权重渐入（simWeightRamp）可能比动画还长 —— 必须先待够，
+      //   否则节点被移出活跃列表后渐入就永远走不完。
+      //   实测：动画 0.729s、ramp 0.9s 时，200 个节点的 simWeight 卡在 0.81 不再上升。
+      D.popDur[i] = Math.max(popDuration(), cfg.pop.simWeightRamp > 0 ? cfg.pop.simWeightRamp : 0);
       D.scaleMul[i] = 1;
       D.renderAlpha[i] = 0;
 
-      // 🌟 Obsidian 分裂机制：受力权重首帧即全开（1.0），连线弹簧立即紧绷产生回弹
-      D.simWeight[i] = 1.0;
+      // 🌟 受力权重：默认【从 0 渐入】（config.pop.simWeightRamp）。
+      //   新节点落在邻居质心上、斥力又是恒定幅值 —— 首帧全开等于给邻居一记闷棍，
+      //   实测一半冲量挤在头 3 帧。渐入把它摊到半秒，总冲量不变、照样落位。
+      //   ramp = 0 时保留旧的「首帧全受力」。
+      D.simWeight[i] = cfg.pop.simWeightRamp > 0 ? 0 : 1.0;
 
       if (D.fadeT[i] === D.fadeT[i]) {
         // 复活一个正在淡出的节点 → 从活跃列表摘除，fadeT 同步清掉
@@ -122,6 +138,34 @@
         if (fadeList[k] === i) { fadeList[k] = fadeList[--fadeN]; break; }
       }
       return true;
+    };
+
+    // 🌟 瞬时隐藏 —— beginHide 的「不等淡出」版本：直接落到淡出走完那一帧的状态
+    //   （= updateFades 里 t >= 1 分支的四个赋值），并把该节点从 pop/fade 两个
+    //   活跃列表里摘掉（见文件内不变量注释：列表成员必须 T 为数字）。
+    //
+    //   为什么需要它：时间轴「重新开始播放」时要把整张图倒回空白，而 beginHide
+    //   是【动画】—— 节点要 0.26 秒才真的 visible=0。这期间它们仍是 visible=1，
+    //   于是紧接着的下一帧揭示会全部命中 setCutoff 的 cancelHide 分支，
+    //   等于绕过了逐帧揭示额度，一帧把整簇放回来。倒带语义上本来就不该有淡出。
+    fx.hideNow = function hideNow(i) {
+      if (i < 0 || i >= n) return;
+      if (D.fadeT[i] === D.fadeT[i]) {
+        for (let k = 0; k < fadeN; k++) {
+          if (fadeList[k] === i) { fadeList[k] = fadeList[--fadeN]; break; }
+        }
+      }
+      if (D.popT[i] === D.popT[i]) {
+        for (let k = 0; k < popN; k++) {
+          if (popList[k] === i) { popList[k] = popList[--popN]; break; }
+        }
+      }
+      D.fadeT[i] = NaN;
+      D.popT[i] = NaN;
+      D.visible[i] = 0;
+      D.simWeight[i] = 0;
+      D.renderAlpha[i] = 0;
+      D.scaleMul[i] = 1;
     };
 
     // =======================================================================
@@ -184,6 +228,8 @@
       if (popN <= 0) return;
 
       const { amp, omega, zeta, fadeInTime } = cfg.pop;
+      const obsidian = cfg.pop.mode === 'obsidian';
+      const rampTime = Math.max(0, cfg.pop.simWeightRamp) || 0;
       const decayRate = Math.max(0.0001, zeta * omega);
       const wd = omega * Math.sqrt(Math.max(0, 1 - zeta * zeta));
 
@@ -213,17 +259,55 @@
         const elapsed = popT[i] + dt;
         popT[i] = elapsed;
 
+        // 🌟 Obsidian 缓动模式（cfg.pop.mode === 'obsidian'）
+        //   实测来源：Obsidian app.asar!/app.js ——
+        //     `cZ=.2, uZ=function(e,t,n){return void 0===n&&(n=.9), e*n+t*(1-n)}`
+        //     节点类 render(): `s = this.fadeAlpha = uZ(s, g)`（g 无高亮时 = 1）
+        //     initGraphics(): `this.fadeAlpha = 0`
+        //   即【纯淡入】：alpha ← alpha×0.9 + 1×0.1，每帧 10% 的指数逼近，
+        //   **没有缩放、没有过冲、没有弹跳**。约 28 帧（470ms）到 95%。
+        //   ⚠ 这正是「节点出生太急」的解药：我们原来的弹簧 + 喷射初速 + 母节点
+        //     后坐力三件套，Obsidian 一个都没有。
+        if (obsidian) {
+          const a = renderAlpha[i] * OBS_KEEP + (1 - OBS_KEEP);
+          renderAlpha[i] = a;
+          scaleMul[i] = 1;              // Obsidian 节点出现时不做缩放
+
+          // 🌟 出生受力权重渐入（见 config.pop.simWeightRamp）
+          if (rampTime > 0 && simWeight[i] < 1) {
+            const w = simWeight[i] + dt / rampTime;
+            simWeight[i] = w > 1 ? 1 : w;
+          }
+
+          // ⚠ 收尾必须【同时】看淡入和渐入 —— 只等 a >= OBS_DONE 的话，
+          //   渐入比 0.73 秒的淡入长时（如 ramp 0.9），节点会带着没走完的权重
+          //   被踢出活跃列表，simWeight 永远卡住。实测卡在 0.8148、200/200 全中招。
+          if (a >= OBS_DONE && simWeight[i] >= 1) {
+            popT[i] = NaN;
+            renderAlpha[i] = 1;
+            popList[j] = popList[--popN];
+            continue;
+          }
+          j++;
+          continue;
+        }
+
         const e = Math.exp(-decayRate * elapsed);
         scaleMul[i] = 1 + amp * e * Math.sin(wd * elapsed);
         renderAlpha[i] = clamp(elapsed / Math.max(0.001, fadeInTime), 0, 1);
 
-        // 🌟 保持受力权重全开
-        simWeight[i] = 1.0;
+        // 🌟 出生权重渐入：与淡入同步把受力权重从 0 推到 1
+        if (rampTime > 0 && simWeight[i] < 1) {
+          const w = simWeight[i] + dt / rampTime;
+          simWeight[i] = w > 1 ? 1 : w;
+        }
 
         if (elapsed >= popDur[i]) {
           popT[i] = NaN;
           scaleMul[i] = 1;
           renderAlpha[i] = 1;
+          // 到这里 simWeight 已经渐入到 1（popDur >= ramp 保证了这一点），
+          // 这一句只是把手改配置/极端 dt 的残余兜干净 —— 不是主要路径。
           simWeight[i] = 1;
           popList[j] = popList[--popN];
           continue;
@@ -307,6 +391,11 @@
     fx.anyActive = function anyActive() {
       return popN > 0 || fadeN > 0 || pulsesActive();
     };
+
+    // 暴露给诊断用：单次出生动画的实际秒数。
+    // 它 × 诞生速率 = 「同一时刻有几个节点正在做出生动画」—— 这才是「密度」，
+    // 只看「每秒几个节点」会漏掉动画时长这一半（__GFI__.tlState() 用它算）。
+    fx.popDuration = popDuration;
 
     function pulsesActive() {
       for (let i = 0; i < poolSize; i++) if (pulses[i].active) return true;

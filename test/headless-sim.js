@@ -178,6 +178,10 @@ check('半径查询至少命中自身', near >= 1 && Array.from(one.slice(0, nea
 section('4. pop-out 弹簧（欠阻尼振子）');
 // ===========================================================================
 (function testPop() {
+  // ⚠ 本节验的是【弹簧】这条路径，必须显式钉死模式 —— 不能依赖 config 默认值
+  //   （默认已改成 'obsidian' = 纯淡入，没有弹簧）。同 §14。
+  const savedPopMode = GFI.config.pop.mode;
+  GFI.config.pop.mode = 'spring';
   const fx = GFI.Effects.create(D, sim);
   const i = 5;
   fx.beginReveal(i, 0);
@@ -200,6 +204,7 @@ section('4. pop-out 弹簧（欠阻尼振子）');
     Math.abs(peakT - tPeakTheory) < 0.02, `实测 ${(peakT * 1000).toFixed(1)}ms`);
   check('动画结束后 scaleMul 归 1', Math.abs(D.scaleMul[i] - 1) < 1e-6, `scaleMul=${D.scaleMul[i]}`);
   check('pop 不影响模拟位置', D.popT[i] !== D.popT[i], 'popT 已清空（NaN）');
+  GFI.config.pop.mode = savedPopMode;
 })();
 
 // ===========================================================================
@@ -496,8 +501,8 @@ section('8. 时间轴端到端 —— 揭示的节点必须真的能画出来');
   const DT6 = GFI.DT;
   tl6.setPlaying(true);
   const vh = 800;
-  // 预算按配置算，别写死 —— 改 baseDurationSec 会让写死的帧数不够用
-  const maxTicks = Math.ceil(GFI.config.timeline.baseDurationSec * 60 * 1.6);
+  // 预算按【实际全程】算，别写死 —— 改「演变节奏」会让写死的帧数不够用
+  const maxTicks = Math.ceil(tl6.playDurationSec * 60 * 1.6);
   for (let k = 0; k < maxTicks; k++) {
     const awake = sim6.isAwake();
     if (awake) sim6.tick(DT6);
@@ -944,6 +949,9 @@ section('14. 出生分槽 —— 同母体同帧兄弟必须角向错开（T1）
 // 出生点喷出。旧实现每个子节点各自「背离质心 + ±0.78rad 抖动」——方向可能
 // 几乎重合，出生瞬间叠成一坨、靠碰撞逐帧顶开。现在按黄金角 137.5° 轮转分槽。
 (function testBuddingSlots() {
+  // ⚠ 出生喷射初速只在 spring 模式下存在（obsidian 模式不注入）→ 显式钉死
+  const savedPopMode = GFI.config.pop.mode;
+  GFI.config.pop.mode = 'spring';
   const T0 = Date.UTC(2024, 0, 1);
   const DAY = 86400000;
   const nodes = [
@@ -1009,6 +1017,8 @@ section('14. 出生分槽 —— 同母体同帧兄弟必须角向错开（T1）
   }
   check('出生 1 tick 后兄弟最近间距 > 10 wu', minDist > 10,
     `最近间距 ${minDist.toFixed(1)} wu（出生点相距仅 3px）`);
+
+  GFI.config.pop.mode = savedPopMode;
 })();
 
 // ===========================================================================
@@ -1192,6 +1202,497 @@ section('17. 被固定节点的斥力对称性 —— 守卫不能写在配对�
   // 反面：被固定的 P 自己必须【不受力】（applyPins 已把它的速度清零）
   check('被固定的节点自身不被积分', A.D.vx[P] === 0 && A.D.vy[P] === 0,
     `v=(${A.D.vx[P]}, ${A.D.vy[P]})`);
+})();
+
+// ===========================================================================
+section('18. 时间线节奏 —— 按秩推进 + 每帧揭示额度');
+// ===========================================================================
+(function testPacing() {
+  // ⚠ 本节的判据全部是【节奏】本身，与用户可调的 config 默认值无关 ——
+  //   所以下面显式钉死所需的那几项，跑完再还原（别让本节污染后续 / 依赖默认值）。
+  const T = GFI.config.timeline;
+  const saved = { rate: T.revealRate, burst: T.burstSmoothing };
+  T.revealRate = 40;          // 用户可调 → 本节显式钉死（1200 个节点 ⇒ 30 秒）
+  T.burstSmoothing = true;
+
+  function rng(seed) {
+    let a = seed | 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const DAY = 86400000, NOW = Date.UTC(2026, 9, 7), SPAN = 900 * DAY;
+
+  // 造图。shape:
+  //   'uniform' —— 900 天均匀铺开（稳态）
+  //   'import'  —— 60% 挤在导入当天（时间戳各不相同，扎堆）
+  //   'instant' —— 60% 共享【同一毫秒】（按秩也救不了，只能靠揭示额度）
+  function makeGraph(N, shape, seed) {
+    const demo = GFI.DataSource.demo(N, { seed, clusters: Math.max(3, Math.round(Math.sqrt(N) / 2)) });
+    const rnd = rng(seed + 991);
+    const t0 = NOW - SPAN;
+    demo.nodes.forEach((nd, i) => {
+      if (shape === 'uniform') nd.createdAt = t0 + (SPAN * i) / Math.max(1, N - 1);
+      else if (shape === 'instant') nd.createdAt = rnd() < 0.6 ? t0 : t0 + DAY + rnd() * (SPAN - DAY);
+      else nd.createdAt = rnd() < 0.6 ? t0 + rnd() * DAY : t0 + DAY + rnd() * (SPAN - DAY);
+    });
+    return GFI.Data.build(demo.nodes, demo.links, null);
+  }
+
+  // 播放到底，返回逐帧揭示数
+  function play(D) {
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+    let hit = 0;
+    const tl = GFI.Timeline.create(D, sim, fx, { onChange(e) { hit += e.revealed; } });
+    const out = { tl, frames: [], seconds: 0, peak: 0, total: 0 };
+    if (!tl.range) return out;
+
+    tl.setPlaying(true);           // 真实入口：会先「倒带」回空白（见 G 节）
+    hit = 0;
+
+    let clock = 0, guard = 0;
+    while (tl.playing && guard++ < 60 * 1200) {
+      hit = 0;
+      tl.update(DT, 800);
+      out.frames.push(hit);
+      out.total += hit;
+      if (hit > out.peak) out.peak = hit;
+      clock += DT;
+    }
+    out.seconds = clock;
+    let pending = 0;
+    for (let i = 0; i < D.n; i++) if (D.wantVisible[i] && !D.visible[i]) pending++;
+    out.pending = pending;
+    return out;
+  }
+
+  // ---- A. 扎堆（时间戳各不相同）—— 靠「按秩推进」本身就摊平了 -------------
+  //   旧实现按毫秒等速推进，会在一帧里跨过整个导入日 ⇒ 一帧放出 700+ 个
+  //   （见 test/timeline-pacing-probe.js 的旧/新对照表）。
+  const DI = makeGraph(1200, 'import', 7);
+  const ri = play(DI);
+  check('前提：大簇确实存在（60% 挤在导入当天）',
+    ri.tl.rate > 0 && ri.tl.pacedCount > 1000, `paced=${ri.tl.pacedCount} rate=${ri.tl.rate.toFixed(1)}/s`);
+
+  const perFrameSupply = ri.tl.rate * DT;
+  check('扎堆的大簇被摊平，没有一帧炸开',
+    ri.peak <= Math.max(3, Math.ceil(perFrameSupply * 3)),
+    `峰值 ${ri.peak} 个/帧（稳态供给 ${perFrameSupply.toFixed(2)}/帧）`);
+  check('摊平之后一个节点都没丢',
+    ri.pending === 0 && ri.total === ri.tl.pacedCount,
+    `揭示 ${ri.total}/${ri.tl.pacedCount}，结束时残留 ${ri.pending}`);
+
+  // ---- B. 完全相同的时间戳 —— 只能靠逐帧揭示额度，按秩救不了 ---------------
+  //   ⚠ 这是「两个机制都必须有」的证据：同一批节点共享同一毫秒时，
+  //     cutoff = sortedTs[k] 一步就把整簇置 want=1，rank 再怎么细分也没用。
+  function playInstant(burst) {
+    T.burstSmoothing = burst;
+    return play(makeGraph(1200, 'instant', 7));
+  }
+  const burstOff = playInstant(false);
+  const burstOn = playInstant(true);
+  T.burstSmoothing = true;
+  check('对照：同一毫秒的大簇，关掉额度确实一帧炸开（额度有牙齿）',
+    burstOff.peak > 200, `关额度峰值 ${burstOff.peak} 个/帧`);
+  check('同一毫秒的大簇被额度摊开',
+    burstOn.peak <= Math.max(3, Math.ceil(perFrameSupply * 3)),
+    `开额度峰值 ${burstOn.peak} 个/帧`);
+  check('额度摊开之后同样一个节点都没丢',
+    burstOn.pending === 0 && burstOn.total === burstOn.tl.pacedCount,
+    `揭示 ${burstOn.total}/${burstOn.tl.pacedCount}，结束时残留 ${burstOn.pending}`);
+
+  // ---- C. 稳态下额度从不触发 —— 均匀分布不该被拖慢 -------------------------
+  const on = play(makeGraph(600, 'uniform', 11));
+  T.burstSmoothing = false;
+  const off = play(makeGraph(600, 'uniform', 11));
+  T.burstSmoothing = true;
+  const skew = Math.abs(on.seconds - off.seconds) / Math.max(1e-6, off.seconds);
+  check('均匀分布下平滑不引入额外时长（额度从不触发）', skew < 0.02,
+    `开 ${on.seconds.toFixed(2)}s / 关 ${off.seconds.toFixed(2)}s，差 ${(skew * 100).toFixed(2)}%`);
+
+  // ---- D. 全程时长由节点数反推，并被速率上下限钳制 -------------------------
+  // 只验 create 期算出来的数，不跑播放（几千帧物理太贵）
+  function durationOf(N, rate) {
+    const keep = T.revealRate;
+    if (rate !== undefined) T.revealRate = rate;
+    const D = makeGraph(N, 'uniform', 3);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+    const tl = GFI.Timeline.create(D, sim, fx, {});
+    T.revealRate = keep;
+    return tl;
+  }
+
+  const r60 = durationOf(600, 60);
+  check('速率 60/秒 × 600 个节点 ⇒ 正好 10 秒（时长是算出来的）',
+    Math.abs(r60.rate - 60) < 1e-9 && Math.abs(r60.playDurationSec - 10) < 1e-9,
+    `rate=${r60.rate}/s 全程 ${r60.playDurationSec.toFixed(2)}s`);
+
+  // ⚠⚠ 回归守卫。曾经是「设总时长 → 反推速率 → 再用 revealRateMin=2.5 钳速率」，
+  //   结果用户把时长调到 60 / 120 秒【全都不生效】，实际永远卡在 32 秒 ——
+  //   一个自动护栏把用户的显式设置顶掉了。现在速率是唯一旋钮，谁都不许覆盖它。
+  const slow = durationOf(81, 0.5);
+  check('速率 0.5/秒 × 81 个节点 ⇒ 正好 162 秒（想调慢就一定调得下去）',
+    Math.abs(slow.rate - 0.5) < 1e-9 && Math.abs(slow.playDurationSec - 162) < 1e-9,
+    `rate=${slow.rate}/s 全程 ${slow.playDurationSec.toFixed(1)}s`);
+  const slower = durationOf(81, 0.2);
+  check('再慢到 0.2/秒也没人顶它（全程 405 秒）',
+    Math.abs(slower.playDurationSec - 405) < 1e-9, `全程 ${slower.playDurationSec.toFixed(0)}s`);
+
+  // 0 = 自动套用 Obsidian 的原公式（实测 app.js：progressionSpeed）
+  const auto = durationOf(100, 0);
+  check('速率设成 0 ⇒ 自动套用 Obsidian 公式 clamp(0.5·√边数, 5, 100)',
+    auto.rateAuto === true && auto.rate >= 5 && auto.rate <= 100,
+    `rate=${auto.rate.toFixed(2)}/s 全程 ${auto.playDurationSec.toFixed(1)}s（rateAuto=${auto.rateAuto}）`);
+
+  const bad = durationOf(100, -5);
+  check('速率设成负数 ⇒ 钳到 0.05 下限，不除零、不倒流',
+    bad.rateAuto === false && bad.rate === 0.05 && Number.isFinite(bad.playDurationSec),
+    `rate=${bad.rate}/s 全程 ${bad.playDurationSec}s`);
+
+  // ---- E. 拖滑块必须即时，不能被额度挡住 -----------------------------------
+  const DS = makeGraph(400, 'import', 5);
+  const simS = GFI.Physics.create(DS, GFI.config.physics);
+  const fxS = GFI.Effects.create(DS, simS);
+  const tlS = GFI.Timeline.create(DS, simS, fxS, {});
+  tlS.setCutoff(tlS.range.min, { silent: true, pulse: false });
+  tlS.setSliderValue(tlS.range.duration, {});          // 一次调用拖到最右
+  let visNow = 0;
+  for (let i = 0; i < DS.n; i++) if (DS.wantVisible[i]) visNow++;
+  check('拖滑块一次到位（额度只作用于播放路径）', visNow === tlS.pacedCount,
+    `一次 setSliderValue 后 ${visNow}/${tlS.pacedCount} 可见`);
+
+  // 游标同步：拖回最左，rank 必须跟着回到「range.min 之前」
+  tlS.setSliderValue(0, {});
+  check('拖回起点后秩游标同步归零（否则下一次播会凭空跳过一段）',
+    tlS.rank <= 1, `rank=${tlS.rank}`);
+
+  // 游标初值必须与 cutoff 初值（range.max，全可见）一致 ——
+  // 否则「不拖滑块、直接从中间按播放」会从 rank 0 起跳，时间轴重放一段。
+  const DM = makeGraph(300, 'uniform', 9);
+  const simM = GFI.Physics.create(DM, GFI.config.physics);
+  const fxM = GFI.Effects.create(DM, simM);
+  const tlM = GFI.Timeline.create(DM, simM, fxM, {});
+  check('create 后游标初值与「全可见」一致（不是字面量里的 0）',
+    tlM.rank === tlM.pacedCount, `rank=${tlM.rank} pacedCount=${tlM.pacedCount}`);
+  tlM.setSliderValue(tlM.range.duration * 0.5, {});
+  check('拖到中段后游标随之落到中段（不是从头开始）',
+    Math.abs(tlM.rank / tlM.pacedCount - 0.5) < 0.05,
+    `rank=${tlM.rank}/${tlM.pacedCount} = ${(tlM.rank / tlM.pacedCount * 100).toFixed(1)}%`);
+
+  // ---- G. 倒带必须一帧清空（instantHide）----------------------------------
+  //   beginHide 是【动画】，节点要 0.26s 才真的 visible=0。若倒带走淡出，
+  //   这 0.26s 里所有节点仍是 visible=1，下一帧揭示会整簇命中 cancelHide
+  //   分支 —— 于是逐帧揭示额度被整个绕过（实测 1200 节点里一帧放回 704 个）。
+  const DR = makeGraph(1200, 'instant', 7);
+  const simR = GFI.Physics.create(DR, GFI.config.physics);
+  const fxR = GFI.Effects.create(DR, simR);
+  const tlR = GFI.Timeline.create(DR, simR, fxR, {});
+  let visBefore = 0;
+  for (let i = 0; i < DR.n; i++) if (DR.visible[i]) visBefore++;
+  tlR.setPlaying(true);                       // 起点在末端 ⇒ 触发倒带
+  let visAfter = 0;
+  for (let i = 0; i < DR.n; i++) if (DR.visible[i]) visAfter++;
+  check('前提：倒带前整张图确实都是可见的', visBefore === DR.n, `${visBefore}/${DR.n}`);
+  check('倒带一帧清空（不是 0.26s 的淡出）', visAfter === 0,
+    `倒带后仍可见 ${visAfter} 个`);
+  check('倒带后没有残留的淡出列表（否则会继续淡出并抢 reveal 路径）',
+    fxR.fadeCount === 0 && fxR.popCount === 0,
+    `fadeCount=${fxR.fadeCount} popCount=${fxR.popCount}`);
+
+  // ---- H. 设置接线：界面上那个「演变节奏」真的能走到 config -----------------
+  //   ⚠ 键名写错、校验器漏写、pick() 忘了加 —— 任何一种都会让设置项【静默失效】：
+  //     界面能改、存档能存、config 纹丝不动。上一轮翻车正是这个形态
+  //     （用户把时长调到 60 秒没反应）。所以这里从 syncSettings 入口正着测。
+  (function testSettingWiring() {
+    const snap = JSON.parse(JSON.stringify(GFI.config));
+    // ⚠ 必须【原地】还原，不能 GFI.config[k] = snap[k] 整体替换 ——
+    //   本文件顶部有 `const T = GFI.config.timeline` 这样的长期引用，
+    //   一替换对象身份，后续所有 T.xxx = ... 都会写进孤儿对象、静默失效。
+    //   （踩过：块 I / J 的 revealRate 因此没生效，跑的还是 40/秒。）
+    const restore = () => {
+      for (const k of Object.keys(snap)) {
+        const cur = GFI.config[k], ref = snap[k];
+        if (cur && typeof cur === 'object' && !Array.isArray(cur) && ref && typeof ref === 'object') {
+          for (const kk of Object.keys(cur)) delete cur[kk];
+          Object.assign(cur, ref);
+        } else {
+          GFI.config[k] = ref;
+        }
+      }
+    };
+    const DEFR = GFI.configDefaults.timeline.revealRate;
+
+    // 旧存档：只有 timelapseDuration，没有 timelapseRate
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION, timelapseDuration: 60 });
+    check('旧存档（只有 timelapseDuration）⇒ 新键取默认值，不是 undefined/NaN',
+      T.revealRate === DEFR, `revealRate=${T.revealRate}（默认 ${DEFR}）`);
+
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION, timelapseRate: 0.5 });
+    check('设置里把「演变节奏」改成 0.5 ⇒ 真的进到 config',
+      T.revealRate === 0.5, `revealRate=${T.revealRate}`);
+
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION, timelapseRate: 9999 });
+    check('超出合法区间 ⇒ 回落默认值（不是静默按 9999 生效）',
+      T.revealRate === DEFR, `revealRate=${T.revealRate}`);
+
+    restore();
+  })();
+
+  // ---- I. Obsidian 出生缓动（pop.mode = 'obsidian'）----------------------
+  //   实测来源：Obsidian app.asar!/app.js
+  //     uZ(e,t,n){ n??=0.9; return e*n+t*(1-n) }   节点 render(): fadeAlpha = uZ(fadeAlpha, 1)
+  //   判据钉在【两件可证伪的事】上：
+  //     ① 渲染：scaleMul 恒为 1（Obsidian 节点出现不做缩放），alpha 按 ×0.9+0.1 走
+  //     ② 物理：新节点不被注入初速，母节点不被反冲
+  (function testObsidianEasing() {
+    const keepMode = GFI.config.pop.mode;
+    const keepRate = T.revealRate;
+    GFI.config.pop.mode = 'obsidian';
+
+    const D = makeGraph(200, 'uniform', 17);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+
+    // ① 渲染曲线：直接对着公式验，不靠肉眼
+    fx.beginReveal(7, 0);
+    check('缓动起点是 alpha=0、scale=1（不是弹簧的 1.0 起始缩放）',
+      D.renderAlpha[7] === 0 && D.scaleMul[7] === 1,
+      `alpha=${D.renderAlpha[7]} scaleMul=${D.scaleMul[7]}`);
+    fx.update(DT);
+    check('一帧后 alpha = 0.1（×0.9 + 0.1，照抄 Obsidian 的 uZ 默认系数）',
+      Math.abs(D.renderAlpha[7] - 0.1) < 1e-6, `alpha=${D.renderAlpha[7].toFixed(4)}`);
+    fx.update(DT);
+    check('两帧后 alpha = 0.19', Math.abs(D.renderAlpha[7] - 0.19) < 1e-5,
+      `alpha=${D.renderAlpha[7].toFixed(4)}`);
+
+    let maxScale = 1, frames = 2;
+    while (D.popT[7] === D.popT[7] && frames < 400) {   // 跑到缓动收尾
+      fx.update(DT); frames++;
+      if (D.scaleMul[7] > maxScale) maxScale = D.scaleMul[7];
+    }
+    check('整个出生过程 scaleMul 恒为 1 —— 没有弹簧、没有过冲',
+      Math.abs(maxScale - 1) < 1e-9, `峰值 scaleMul=${maxScale}`);
+    check('缓动在 ~44 帧内收尾（0.9^n<0.01），不是永远挂着',
+      frames <= 46 && D.renderAlpha[7] === 1, `${frames} 帧后 alpha=${D.renderAlpha[7]}`);
+    check('收尾后从活跃列表摘除（不变量：计数 = 列表长度）',
+      D.popT[7] !== D.popT[7], `popT=${D.popT[7]} popCount=${fx.popCount}`);
+
+    // ② 物理：Obsidian 模式不许注入初速 / 后坐力
+    const D2 = makeGraph(120, 'uniform', 19);
+    const sim2 = GFI.Physics.create(D2, GFI.config.physics);
+    const fx2 = GFI.Effects.create(D2, sim2);
+    const tl2 = GFI.Timeline.create(D2, sim2, fx2, {});
+    tl2.setPlaying(true);
+    let hit = null;
+    for (let k = 0; k < 60 * 400 && !hit; k++) {
+      tl2.update(DT, 800);
+      for (let i = 0; i < D2.n; i++) {
+        if (D2.visible[i] && D2.popT[i] === 0) { hit = i; break; }   // 刚出生的
+      }
+    }
+    check('前提：抓到了一个刚出生的节点', hit !== null, `index=${hit}`);
+    if (hit !== null) {
+      check('Obsidian 模式：新节点【没有】喷射初速（初速 0，不是 22）',
+        D2.vx[hit] === 0 && D2.vy[hit] === 0,
+        `v=(${D2.vx[hit].toFixed(3)}, ${D2.vy[hit].toFixed(3)})`);
+    }
+
+    GFI.config.pop.mode = keepMode;
+    T.revealRate = keepRate;
+  })();
+
+  // ---- J. 节点出现 → 给其他节点的力（Obsidian 机制）-----------------------
+  //   实测来源：app.js setData()
+  //     · 落点 = 【已存在邻居位置均值】± (rand-.5)*F，F = 60·√I
+  //     · 数据一变唯一动作：worker.postMessage({..., alpha:.3, run:true})
+  //   本节验两件事：
+  //     ① 落点必须贴着「可见邻居质心」（不是 spring 的「单个母体旁 3px」）
+  //     ② 有节点出生的窗口，全场位移必须【远大于】没有出生的窗口
+  //        ⚠ ② 必须做这个对照 —— 只看"出生窗口位移大"是假的，背景一直在动也会大
+  (function testBirthForce() {
+    const keepMode = GFI.config.pop.mode;
+    const keepRate = T.revealRate;
+    const keepPlay = GFI.config.reheat.timelinePlay;
+    GFI.config.pop.mode = 'obsidian';
+    // ⚠ 必须 1.0/秒：出生间隔 60 帧，30 帧窗才真的能采到「不在重热尾巴里」的对照窗。
+    //   1.5/秒（间隔 40 帧）时上一发的 alpha 还有 0.15，两类窗口测出来一模一样（1.0×）。
+    T.revealRate = 1;
+    GFI.config.reheat.timelinePlay = 0.30;
+    const LD = GFI.config.physics.linkDistance;
+
+    const D = makeGraph(100, 'uniform', 29);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+    let h = 0; while (sim.isAwake() && h++ < 60 * 120) sim.tick(DT);
+    const tl = GFI.Timeline.create(D, sim, fx, {});
+    tl.setPlaying(true);
+
+    // ① 落点 vs 可见邻居质心：按【本帧新生数】算当帧的抖动上界，逐节点精确对账
+    let worst = 0, worstBound = 0, anchorSamples = 0;
+    // ② 窗口对照
+    const bornW = [], quietW = [];
+    const x0 = new Float64Array(D.n), y0 = new Float64Array(D.n);
+    const watch = new Uint8Array(D.n);
+    let g = 0, timer = 0, sawBirth = false;
+
+    while (tl.playing && g++ < 60 * 400) {
+      if (timer === 0) {
+        for (let i = 0; i < D.n; i++) {
+          x0[i] = D.x[i]; y0[i] = D.y[i];
+          // ⚠ 必须把「本窗内才出生的节点」排除掉：它的落点是从种子位置瞬移过来的，
+          //   位移几百 wu，会把邻居那几十 wu 完全盖住 —— 指标就退化成了在量瞬移。
+          //   （踩过：不排除时，把重热压到 0.0001 这条断言照样通过。）
+          watch[i] = (D.visible[i] && D.popT[i] !== D.popT[i]) ? 1 : 0;
+        }
+        sawBirth = false;
+      }
+
+      tl.update(DT, 800);
+
+      // 本帧新生数（决定抖动半径 F = 0.12·linkDistance·√I）
+      let batch = 0;
+      for (let i = 0; i < D.n; i++) if (D.popT[i] === 0) batch++;
+      if (batch > 0) {
+        sawBirth = true;
+        // ⚠ Obsidian 的抖动是 x、y 【各自】±F/2 ⇒ 径向最大 = spread·√2
+        const bound = 0.12 * LD * Math.sqrt(batch) * Math.SQRT2 + 1e-6;
+        for (let i = 0; i < D.n; i++) {
+          if (D.popT[i] !== 0) continue;
+          let cx = 0, cy = 0, k = 0;
+          for (let p = D.adjStart[i]; p < D.adjStart[i + 1]; p++) {
+            const j = D.adjList[p];
+            if (j === i || !D.visible[j]) continue;
+            cx += D.x[j]; cy += D.y[j]; k++;
+          }
+          if (k < 1) continue;
+          anchorSamples++;
+          const off = Math.hypot(D.x[i] - cx / k, D.y[i] - cy / k);
+          if (off > worst) { worst = off; worstBound = bound; }
+        }
+      }
+
+      if (sim.isAwake()) sim.tick(DT);
+      fx.update(DT);
+
+      if (++timer === 30) {
+        let mx = 0;
+        for (let i = 0; i < D.n; i++) {
+          if (!watch[i]) continue;
+          const d = Math.hypot(D.x[i] - x0[i], D.y[i] - y0[i]);
+          if (d > mx) mx = d;
+        }
+        (sawBirth ? bornW : quietW).push(mx);
+        timer = 0;
+      }
+    }
+
+    check('① 前提：采到了落点样本', anchorSamples > 20, `${anchorSamples} 个`);
+    check('① Obsidian 落点 = 可见邻居质心 ± 抖动（逐个节点对当帧上界对账）',
+      anchorSamples > 0 && worst <= worstBound,
+      `最大偏离 ${worst.toFixed(3)} wu ≤ 当帧上界 ${worstBound.toFixed(3)} wu（linkDistance=${LD}）`);
+
+    const avg = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+    const bAvg = avg(bornW), qAvg = avg(quietW);
+    check('② 前提：两种窗口都采到了', bornW.length > 5 && quietW.length > 5,
+      `有出生 ${bornW.length} 窗 / 无出生 ${quietW.length} 窗`);
+    // ⚠ 判据必须钉在【绝对位移】上，不能只看比值 ——
+    //   实测：把出生时的 sim.reheat 整个删掉后，两类窗口的位移双双塌到 0.7 / 0.3 wu，
+    //   而【比值反而从 1.5× 涨到 2.7×】。纯比值判据对「机制被删掉」是瞎的。
+    check('②a 出生确实给其他节点注入了力（绝对位移够大）',
+      bAvg > 0.2 * LD,
+      `有出生窗口 ${bAvg.toFixed(1)} wu > 阈值 ${(0.2 * LD).toFixed(1)} wu（0.2×linkDistance）`);
+    check('②b 且这份位移确实来自出生（有出生窗口 > 无出生窗口）',
+      bAvg > 1.15 * Math.max(0.5, qAvg),
+      `有出生 ${bAvg.toFixed(1)} wu vs 无出生 ${qAvg.toFixed(1)} wu（${(bAvg / Math.max(0.1, qAvg)).toFixed(1)}×）`);
+
+    GFI.config.pop.mode = keepMode;
+    T.revealRate = keepRate;
+    GFI.config.reheat.timelinePlay = keepPlay;
+  })();
+
+  // ---- K. 出生时的受力权重渐入（pop.simWeightRamp）-----------------------
+  //   新节点落在邻居质心上、斥力又是恒定幅值（chargeFalloff=0），首帧全受力
+  //   等于给邻居一记闷棍。实测把邻居逐帧 Δv 分解：首帧 1.14、前 3 帧占 49% 冲量；
+  //   渐入 0.3s 后 → 首帧 0.11、前 3 帧 16%。
+  (function testSimWeightRamp() {
+    const keepRamp = GFI.config.pop.simWeightRamp;
+    const keepMode = GFI.config.pop.mode;
+    const keepRate = T.revealRate;
+    // ⚠ 刻意取 0.9（比淡入的 0.73 秒【长】）：这正是「渐入还没走完就被踢出
+    //   活跃列表、simWeight 永远卡住」那个坑的复现条件。默认 0.3 短于淡入，碰不到。
+    GFI.config.pop.simWeightRamp = 0.9;
+    GFI.config.pop.mode = 'obsidian';
+    T.revealRate = 5;
+
+    const D = makeGraph(200, 'uniform', 31);
+    const sim = GFI.Physics.create(D, GFI.config.physics);
+    const fx = GFI.Effects.create(D, sim);
+    const tl = GFI.Timeline.create(D, sim, fx, {});
+    tl.setPlaying(true);
+
+    // 跑到一个节点出生的那一帧（setCutoff 之后、fx.update 之前）
+    let born = -1, g = 0;
+    while (born < 0 && g++ < 60 * 600) {
+      tl.update(DT, 800);
+      for (let i = 0; i < D.n; i++) if (D.popT[i] === 0) { born = i; break; }
+    }
+    check('前提：抓到一个刚出生的节点', born >= 0, `index=${born}`);
+    check('出生瞬间受力权重是 0（不是首帧全开的 1.0）',
+      born >= 0 && D.simWeight[born] === 0,
+      `simWeight[${born}]=${born >= 0 ? D.simWeight[born] : "n/a"}`);
+
+    // 渐入应该在 0.3s ≈ 18 帧内到 1
+    let fr = 0;
+    while (born >= 0 && D.simWeight[born] < 1 && fr < 200) { fx.update(DT); fr++; }
+    check('渐入在 ramp 时间内到达 1（0.9s = 54 帧）',
+      born >= 0 && D.simWeight[born] === 1 && fr >= 50 && fr <= 58,
+      `${fr} 帧后 simWeight=${born >= 0 ? D.simWeight[born] : "n/a"}`);
+
+    // 全程播完：不许有节点带着没走完的权重留在场上
+    //   ⚠ 这条是防回退的：曾经 obsidian 分支只在 renderAlpha>=0.99（0.73s）时收尾，
+    //     而渐入可能更长 —— 节点被提前踢出活跃列表，simWeight 卡在 0.8148 再不上升。
+    // ⚠ 播放结束后必须继续推 fx 直到 anyActive() 为假 —— 这正是主循环的行为：
+    //   main.js 的 busy 判定含 P.fx.anyActive()，而它在 pop 列表非空时为真，
+    //   所以还有节点在渐入时循环不会停。测试若在 playing=false 就收手，
+    //   最后出生的几个节点会被误判成「卡住」（实测 2 个卡在 0.0556 = 恰好一帧的渐入量）。
+    while (tl.playing && g++ < 60 * 900) { tl.update(DT, 800); sim.tick(DT); fx.update(DT); }
+    let drain = 0;
+    while (fx.anyActive() && drain++ < 60 * 30) { if (sim.isAwake()) sim.tick(DT); fx.update(DT); }
+    let stuck = 0, worst = 1;
+    for (let i = 0; i < D.n; i++) {
+      if (!D.visible[i] || D.simWeight[i] >= 1) continue;
+      stuck++; if (D.simWeight[i] < worst) worst = D.simWeight[i];
+    }
+    check('播完整段后没有节点卡在半个权重上',
+      stuck === 0, stuck ? `${stuck} 个未归位，最小 ${worst.toFixed(4)}` : '全部 = 1');
+
+    // 反向：ramp = 0 时必须回到「首帧全受力」（保住那条老行为的开关）
+    GFI.config.pop.simWeightRamp = 0;
+    const D2 = makeGraph(200, 'uniform', 31);
+    const sim2 = GFI.Physics.create(D2, GFI.config.physics);
+    const fx2 = GFI.Effects.create(D2, sim2);
+    const tl2 = GFI.Timeline.create(D2, sim2, fx2, {});
+    tl2.setPlaying(true);
+    let b2 = -1, g2 = 0;
+    while (b2 < 0 && g2++ < 60 * 600) {
+      tl2.update(DT, 800);
+      for (let i = 0; i < D2.n; i++) if (D2.popT[i] === 0) { b2 = i; break; }
+    }
+    check('ramp = 0 时回到旧行为（首帧全受力）—— 开关有效',
+      b2 >= 0 && D2.simWeight[b2] === 1,
+      `simWeight[${b2}]=${b2 >= 0 ? D2.simWeight[b2] : "n/a"}`);
+
+    GFI.config.pop.simWeightRamp = keepRamp;
+    GFI.config.pop.mode = keepMode;
+    T.revealRate = keepRate;
+  })();
+  T.revealRate = saved.rate; T.burstSmoothing = saved.burst;
 })();
 
 // ===========================================================================

@@ -391,23 +391,67 @@
     // -----------------------------------------------------------------------
     // 边：三个色类 → 最多 3 次 stroke()
     // -----------------------------------------------------------------------
+    // 🌟 正在淡入的边（两端 renderAlpha 都还没到 1）单独画。
+    //
+    //   为什么必须这么做：Obsidian 的【边也在缓动】—— app.js 连边类 render() 里
+    //     `n.alpha = uZ(n.alpha, c)`，初始值是 initGraphics 给的 cZ·颜色alpha
+    //     （cZ = 0.2，即只有两成），再逐帧缓动到满。
+    //   而我们是一条 path 一次性 stroke 全亮度，且边的可见性是二值的
+    //   （visible[] 在 beginReveal 里【立刻】置 1）—— 于是出生那一帧画面上会冒出
+    //   【一条满亮度的线，挂在一个 alpha 才 0.1、几乎看不见的节点上】。
+    //   这比节点本身还刺眼，也是「还是突然」的最后一个来源。
+    //
+    //   边 alpha 取两端 renderAlpha 的 min ⇒ 边跟着【较晚出现】的那一端一起淡入。
+    //   稳态里两端都是 1，走原来的批量路径，一帧不多花。
+    const fadingEdges = [];        // [edge, alpha, style, …]  style: 0 普通 / 1 压暗 / 2 高亮
+    function edgeAlpha(e) {
+      const ra = D.renderAlpha, a = ra[D.lsrc[e]], b = ra[D.ltgt[e]];
+      return a < b ? a : b;
+    }
+    function drawFadingEdges(fn, wNormal, wHi) {
+      if (!fn) return;
+      const { lsrc, ltgt, x, y } = D;
+      let curStyle = -1;
+      for (let q = 0; q < fn; q += 3) {
+        const e = fadingEdges[q], a = fadingEdges[q + 1], st = fadingEdges[q + 2];
+        if (st !== curStyle) {
+          curStyle = st;
+          ctx.strokeStyle = st === 2 ? rcfg.edgeColorHi : (st === 1 ? rcfg.edgeColorDim : rcfg.edgeColor);
+          ctx.lineWidth = st === 2 ? wHi : wNormal;
+        }
+        const s = lsrc[e], t = ltgt[e];
+        ctx.globalAlpha = a;
+        ctx.beginPath();
+        ctx.moveTo(cam.worldToScreenX(x[s]), cam.worldToScreenY(y[s]));
+        ctx.lineTo(cam.worldToScreenX(x[t]), cam.worldToScreenY(y[t]));
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
     function drawEdges(hot, k) {
       if (!edgeCount) return;
       const { lsrc, ltgt, x, y, hl } = D;
       const wNormal = clamp(rcfg.edgeWidthBase + rcfg.edgeWidthSlope * k, rcfg.edgeWidthMin, rcfg.edgeWidthMax);
       const wHi = Math.max(1.0, wNormal * 1.4);
+      let fn = 0;
 
       if (hot < 0) {
         ctx.strokeStyle = rcfg.edgeColor;
         ctx.lineWidth = wNormal;
         ctx.beginPath();
+        let nb = 0;
         for (let p = 0; p < edgeCount; p++) {
           const e = edgeList[p];
+          const ea = edgeAlpha(e);
+          if (ea < 0.999) { fadingEdges[fn++] = e; fadingEdges[fn++] = ea; fadingEdges[fn++] = 0; continue; }
           const s = lsrc[e], t = ltgt[e];
           ctx.moveTo(cam.worldToScreenX(x[s]), cam.worldToScreenY(y[s]));
           ctx.lineTo(cam.worldToScreenX(x[t]), cam.worldToScreenY(y[t]));
+          nb++;
         }
-        ctx.stroke();
+        if (nb) ctx.stroke();          // 全被抽去逐条淡入时别描空气
+        drawFadingEdges(fn, wNormal, wHi);
         return;
       }
 
@@ -415,26 +459,36 @@
       ctx.strokeStyle = rcfg.edgeColorDim;
       ctx.lineWidth = wNormal;
       ctx.beginPath();
+      let nb1 = 0;
       for (let p = 0; p < edgeCount; p++) {
         const e = edgeList[p];
         const s = lsrc[e], t = ltgt[e];
         if (hl[s] >= 2 && hl[t] >= 2) continue;
+        const ea = edgeAlpha(e);
+        if (ea < 0.999) { fadingEdges[fn++] = e; fadingEdges[fn++] = ea; fadingEdges[fn++] = 1; continue; }
         ctx.moveTo(cam.worldToScreenX(x[s]), cam.worldToScreenY(y[s]));
         ctx.lineTo(cam.worldToScreenX(x[t]), cam.worldToScreenY(y[t]));
+        nb1++;
       }
-      ctx.stroke();
+      if (nb1) ctx.stroke();
 
       ctx.strokeStyle = rcfg.edgeColorHi;
       ctx.lineWidth = wHi;
       ctx.beginPath();
+      let nb2 = 0;
       for (let p = 0; p < edgeCount; p++) {
         const e = edgeList[p];
         const s = lsrc[e], t = ltgt[e];
         if (!(hl[s] >= 2 && hl[t] >= 2)) continue;
+        const ea = edgeAlpha(e);
+        if (ea < 0.999) { fadingEdges[fn++] = e; fadingEdges[fn++] = ea; fadingEdges[fn++] = 2; continue; }
         ctx.moveTo(cam.worldToScreenX(x[s]), cam.worldToScreenY(y[s]));
         ctx.lineTo(cam.worldToScreenX(x[t]), cam.worldToScreenY(y[t]));
+        nb2++;
       }
-      ctx.stroke();
+      if (nb2) ctx.stroke();
+
+      drawFadingEdges(fn, wNormal, wHi);
     }
 
     // -----------------------------------------------------------------------
@@ -484,6 +538,28 @@
     // -----------------------------------------------------------------------
     // 节点头：按颜色分组，每组一次 fill()
     // -----------------------------------------------------------------------
+    // 🌟 正在出生的节点：用【精确 alpha】逐个画，不进 8 级量化桶。
+    //   为什么必须单独一条路：8 级量化把淡入切成 +0.143 的台阶（Obsidian 是 +0.100
+    //   连续），而且 a ∈ [6/7, 1) 一律被压成 0.9286 —— 实测最后连续 24 帧（0.4 秒）
+    //   画面完全不变，然后突然跳到 1.0。观感就是「节点一下子蹦出来」。
+    //   同时在场的出生节点只有 2~3 个，逐个 beginPath/fill 的代价可忽略。
+    const midBirth = [];
+    function drawMidBirth(list2, cnt, k, hl) {
+      const table = D.colorTable, ra = D.renderAlpha;
+      for (let q = 0; q < cnt; q++) {
+        const i = list2[q];
+        const r = Math.max(0.6, D.radius[i] * D.scaleMul[i] * k);
+        const sx = cam.worldToScreenX(D.x[i]);
+        const sy = cam.worldToScreenY(D.y[i]);
+        ctx.fillStyle = table[D.colorIdx[i]];
+        ctx.globalAlpha = ra[i] * (hl[i] === 0 ? 0.35 : 1);
+        ctx.beginPath();
+        ctx.moveTo(sx + r, sy);
+        ctx.arc(sx, sy, r, 0, TAU);
+        ctx.fill();
+      }
+    }
+
     function drawCores(list, count, k, lodCfg, hoverIdx) {
       const { x, y, radius, renderAlpha, scaleMul, colorIdx, hl, visible } = D;
       const table = D.colorTable;
@@ -494,17 +570,19 @@
       bucketCount.fill(0, 0, nBuckets);
 
       // ---- 计数 ----
-      let total = 0;
+      let total = 0, midN = 0;
       for (let p = 0; p < count; p++) {
         const i = list[p];
         if (!visible[i]) continue;
         const a = renderAlpha[i];
         if (a <= 0.01) continue;
+        // 出生中的节点不进桶 —— 它们的淡入必须是连续的
+        if (D.popT[i] === D.popT[i]) { midBirth[midN++] = i; continue; }
         const dim = hl[i] === 0 ? 1 : 0;
         bucketCount[(colorIdx[i] * ALPHA_LEVELS + alphaLevel(a)) * 2 + dim]++;
         total++;
       }
-      if (!total) { ctx.globalAlpha = 1; return; }
+      if (!total) { ctx.globalAlpha = 1; drawMidBirth(midBirth, midN, k, hl); return; }
 
       // ---- 前缀和 ----
       let acc = 0;
@@ -518,6 +596,7 @@
         if (!visible[i]) continue;
         const a = renderAlpha[i];
         if (a <= 0.01) continue;
+        if (D.popT[i] === D.popT[i]) continue;      // 已在计数趟摘出
         const dim = hl[i] === 0 ? 1 : 0;
         bucketed[bucketCursor[(colorIdx[i] * ALPHA_LEVELS + alphaLevel(a)) * 2 + dim]++] = i;
       }
@@ -548,6 +627,7 @@
         ctx.fill();
       }
       ctx.globalAlpha = 1;
+      drawMidBirth(midBirth, midN, k, hl);
     }
 
     // -----------------------------------------------------------------------
@@ -624,7 +704,7 @@
         for (let p = 0; p < count; p++) {
           const i = list[p];
           if (i === hot || !visible[i] || hl[i] < 2) continue;
-          if (renderAlpha[i] < 0.55) continue;
+          if (renderAlpha[i] <= 0.01) continue;   // 阈值降到与节点同样的剔除线，渐变交给 renderAlpha
           drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, true);
         }
         finishLabelFrame(n);
@@ -647,7 +727,7 @@
         const i = list[p];
         if (!labelShown[i] || !visible[i]) continue;
         if (!journalLabelsOn && kind[i] === JK) continue;
-        if (renderAlpha[i] < 0.55) continue;
+        if (renderAlpha[i] <= 0.01) continue;   // 阈值降到与节点同样的剔除线，渐变交给 renderAlpha
         drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, false);
       }
 
@@ -666,7 +746,7 @@
           if (!journalLabelsOn && kind[i] === JK) continue;
           const rk = labelRank[i];
           if (rk <= lo || rk > hiRank) continue;
-          if (renderAlpha[i] < 0.55) continue;
+          if (renderAlpha[i] <= 0.01) continue;   // 阈值降到与节点同样的剔除线，渐变交给 renderAlpha
           drawOne(i, cell, cw, ch, x, y, label, radius, scaleMul, k, false, false);
         }
       }
@@ -820,13 +900,13 @@
 
       // 🌟 L1×L3：精灵 alpha = 常态系数 × 个体渐变 × 全局淡变 × 重叠变暗
       if (hi) {
-        ctx.globalAlpha = a01 * labelFadeMul * dim;
+        ctx.globalAlpha = a01 * labelFadeMul * dim * D.renderAlpha[i];
         ctx.fillStyle = rcfg.labelColorHi;
         // 先描边再加字（font / strokeStyle / lineWidth / textAlign 由 drawLabels 设好）
         if (rcfg.labelHaloWidth > 0) ctx.strokeText(text, sx, sy);
         ctx.fillText(text, sx, sy);
       } else {
-        ctx.globalAlpha = rcfg.labelAlpha * a01 * labelFadeMul * dim;
+        ctx.globalAlpha = rcfg.labelAlpha * a01 * labelFadeMul * dim * D.renderAlpha[i];
         // 精灵内部文字左缘在 labelPad 处 → 精灵左缘 = bx0。
         // 贴到设备像素栅格再 blit —— 落在半像素上同样会引入重采样（见 makeLabelSprite）
         ctx.drawImage(sprite.canvas,

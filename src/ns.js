@@ -79,7 +79,7 @@
     };
   }
 
-  // 监听器登记表 —— 保证 teardown 时一个不漏-
+  // 监听器登记表 
   function createListenerRegistry() {
     const entries = [];
     return {
@@ -99,7 +99,6 @@
   }
 
   // 颜色
-  // '#rrggbb' → [r,g,b]
   function hexToRgb(hex) {
     const h = hex.charCodeAt(0) === 35 ? hex.slice(1) : hex;
     const v = parseInt(h.length === 3
@@ -108,7 +107,7 @@
     return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
   }
 
-  // 把 '#rrggbb' 预转成 'rgba(r,g,b,' 前缀，配 globalAlpha 用，避免每帧拼字符串
+  // 把 '#rrggbb' 预转成 'rgba(r,g,b,'
   function rgbaPrefix(hex) {
     const [r, g, b] = hexToRgb(hex);
     return `rgba(${r},${g},${b},`;

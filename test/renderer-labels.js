@@ -35,7 +35,7 @@ function makeStubCtx(canvas) {
     fill: 0, stroke: 0, clearRect: 0, measureText: 0,
     // L1/L2/L3 断言用：drawImage 的来源精灵画布（同一字符串 = 同一张精灵）
     // 与调用瞬间的 globalAlpha。数组型计数在 draw() 里清空方式不同。
-    srcs: [], alphas: [],
+    srcs: [], alphas: [], arcs: [], strokeAlphas: [],
     // 绝对摆放断言用：drawImage 的目标矩形（精灵左缘/上缘/宽/高，CSS 像素）
     dsts: [],
   };
@@ -48,9 +48,11 @@ function makeStubCtx(canvas) {
     lineJoin: 'miter', lineCap: 'butt', miterLimit: 10,
     setTransform() {}, save() {}, restore() {},
     clearRect() { calls.clearRect++; },
-    beginPath() {}, moveTo() {}, lineTo() {}, arc() {}, rect() {}, closePath() {},
+    beginPath() {}, moveTo() {}, lineTo() {}, closePath() {},
+    // 出生淡入断言用：记录每个圆的圆心与画它时的 globalAlpha
+    arc(x, y, r) { calls.arcs.push({ x, y, r, a: this.globalAlpha }); },
     fill() { calls.fill++; },
-    stroke() { calls.stroke++; },
+    stroke() { calls.stroke++; calls.strokeAlphas.push(this.globalAlpha); },
     createRadialGradient() { return { addColorStop() {} }; },
     fillRect() {},
     // 固定字宽 —— 7px/字符，可预测，便于精确推算标签包围盒
@@ -577,6 +579,113 @@ section('11. labelYield = false（Obsidian 默认）—— 每个节点都画名
   GFI.config.render.labelYield = prev;
 })();
 
+// ===========================================================================
+section('12. 出生淡入必须【连续】—— 不能被 8 级量化切成台阶');
+// ===========================================================================
+// 背景：drawCores 为了批处理（一次 fill 只能一个 globalAlpha）把 alpha 量化成 8 级。
+// 出生中的节点因此会变成：
+//   · 台阶 +0.143（Obsidian 的连续曲线是 +0.100）
+//   · a ∈ [6/7, 1) 全被压成 0.9286 —— 实测最后连续 24 帧（0.4 秒）画面纹丝不动，
+//     然后猛地跳到 1.0。观感就是「节点一下子蹦出来」。
+// 修法：出生中的节点（popT 为数字）不进桶，走 drawMidBirth 的【精确 alpha】路径。
+(function testBirthAlpha() {
+  const S = makeScene(['a', 'b', 'c', 'd', 'e']);
+  const D = S.D;
+  // 摆到互不重合的位置，便于按圆心反查每个圆的 alpha
+  for (let i = 0; i < 5; i++) {
+    D.x[i] = screenToWorldX(60 + i * 70);
+    D.y[i] = screenToWorldY(200);
+    D.visible[i] = 1;
+  }
+  // 0/1/2/3 出生中（popT 为数字）；4 是常态节点
+  const VALS = [0.103, 0.342, 0.721, 0.950];
+  const EXPECT_Q = [0.0714, 0.3571, 0.7857, 0.9286];   // 量化后本会变成的值
+  for (let i = 0; i < 4; i++) { D.popT[i] = 0; D.renderAlpha[i] = VALS[i]; }
+  D.popT[4] = NaN; D.renderAlpha[4] = 0.342;
+
+  S.draw({});
+  const arcs = S.ctx.calls.arcs;
+  const alphaAt = (i) => {
+    const sx = S.cam.worldToScreenX(D.x[i]), sy = S.cam.worldToScreenY(D.y[i]);
+    const hit = arcs.find((c) => Math.abs(c.x - sx) < 0.6 && Math.abs(c.y - sy) < 0.6);
+    return hit ? hit.a : null;
+  };
+
+  let ok = true, detail = [];
+  for (let i = 0; i < 4; i++) {
+    const got = alphaAt(i);
+    if (got === null || Math.abs(got - VALS[i]) > 1e-6) ok = false;
+    detail.push(`n${i}: ${got === null ? "没画" : got.toFixed(4)}(期望${VALS[i].toFixed(3)})`);
+  }
+  check('出生中的节点按【精确 alpha】绘制（4 个不同值全部命中）', ok, detail.join(' '));
+
+  const q4 = alphaAt(4);
+  check('对照：常态节点仍然走 8 级量化（批处理路径没被破坏）',
+    q4 !== null && Math.abs(q4 - 2.5 / 7) < 1e-9,
+    `n4 alpha=${q4 === null ? "没画" : q4.toFixed(4)}，量化值应为 2.5/7=0.35714（原始 0.342）`);
+
+  const q4raw = q4 !== null;
+  check('且这个值确实【不等于】原值 —— 证明对照有效（不是恰好相等）',
+    q4raw && Math.abs(q4 - 0.342) > 1e-3,
+    `|${q4 === null ? 0 : q4.toFixed(4)} − 0.342| = ${q4 === null ? 0 : Math.abs(q4 - 0.342).toFixed(4)}`);
+
+  // 曾经的死区：a ∈ [6/7, 1) 一律 0.9286，直到 44 帧收尾才跳 1.0
+  const hi = alphaAt(3);
+  check('a=0.950 不再被压成 0.9286（原来的 24 帧死区）',
+    hi !== null && Math.abs(hi - 0.95) < 1e-6 && Math.abs(hi - 0.9286) > 1e-3,
+    `alpha=${hi === null ? "没画" : hi.toFixed(4)}`);
+})();
+// ===========================================================================
+section('13. 边必须跟着节点淡入 —— 不能满亮度瞬现');
+// ===========================================================================
+// Obsidian 的连边也在缓动：app.js 连边类 render() 里 `n.alpha = uZ(n.alpha, c)`，
+// 初始值是 initGraphics 给的 cZ·颜色alpha（cZ=0.2，只有两成）。
+// 而我们原先是一条 path 一次性 stroke 全亮度，且边的可见性是二值的
+// （visible[] 在 beginReveal 里立刻置 1）—— 出生那一帧就会冒出一条满亮度的线，
+// 挂在一个 alpha 才 0.1 的节点上。这是「节点出现得突然」的最后一个来源。
+(function testEdgeFade() {
+  const nodes = [{ id: 'a', label: 'a', kind: 'page' }, { id: 'b', label: 'b', kind: 'page' }];
+  const links = [{ source: 'a', target: 'b' }];
+  const D = GFI.Data.build(nodes, links, null);
+  const cam = GFI.Camera.create(VW, VH);
+  cam.k = 1; cam.x = 0; cam.y = 0;
+  const canvas = makeStubCanvas();
+  const renderer = GFI.Renderer.create(canvas, D, cam);
+  renderer.resize(VW, VH, DPR);
+  D.x[0] = screenToWorldX(100); D.y[0] = screenToWorldY(200);
+  D.x[1] = screenToWorldX(300); D.y[1] = screenToWorldY(200);
+  D.visible[0] = 1; D.visible[1] = 1;
+  const ctx = canvas.getContext(2 ? "2d" : "2d");
+  const clear = () => { for (const kk in ctx.calls) {
+    if (Array.isArray(ctx.calls[kk])) ctx.calls[kk].length = 0; else ctx.calls[kk] = 0; } };
+
+  // 一端刚出生（alpha 0.3），另一端早已就位（alpha 1）
+  D.renderAlpha[0] = 0.30; D.renderAlpha[1] = 1.0;
+  clear();
+  renderer.render({ hoverIdx: -1, selectedIdx: -1, lod: 0, labelsOn: false });
+  const a1 = ctx.calls.strokeAlphas.slice();
+  check("新节点那侧的边按 min(两端 alpha) 淡入（不是满亮度）",
+    a1.length === 1 && Math.abs(a1[0] - 0.30) < 1e-6,
+    `stroke globalAlpha=[${a1.map((v) => v.toFixed(3)).join(", ")}]（期望 0.300）`);
+
+  // 对照：两端都到 1 之后必须回到批量路径（一帧一次 stroke，alpha=1）
+  D.renderAlpha[0] = 1.0;
+  clear();
+  renderer.render({ hoverIdx: -1, selectedIdx: -1, lod: 0, labelsOn: false });
+  const a2 = ctx.calls.strokeAlphas.slice();
+  check("两端都出现后回到批量路径（一次 stroke、alpha=1，没有逐条退化）",
+    a2.length === 1 && Math.abs(a2[0] - 1) < 1e-6,
+    `stroke 次数=${a2.length}，alpha=[${a2.map((v) => v.toFixed(3)).join(", ")}]`);
+
+  // 反向：把 alpha 调到稳态值 1 之前的典型中间值，再验一次（防止上面只是特例）
+  D.renderAlpha[0] = 0.72;
+  clear();
+  renderer.render({ hoverIdx: -1, selectedIdx: -1, lod: 0, labelsOn: false });
+  const a3 = ctx.calls.strokeAlphas.slice();
+  check("中间值同样精确（0.72，不是被量化/被忽略）",
+    a3.length === 1 && Math.abs(a3[0] - 0.72) < 1e-6,
+    `stroke globalAlpha=[${a3.map((v) => v.toFixed(3)).join(", ")}]`);
+})();
 // ===========================================================================
 // 结果
 // ===========================================================================
