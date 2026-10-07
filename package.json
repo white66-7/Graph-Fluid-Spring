@@ -1,6 +1,6 @@
 {
   "name": "logseq-plugin-graph-fluid-spring",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A living, force-simulated knowledge graph for Logseq — with momentum dragging, pop-out springs, radial shockwaves and time-travel growth. Replaces the built-in graph view.",
   "main": "index.html",
   "author": "white66-7",

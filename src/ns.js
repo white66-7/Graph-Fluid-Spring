@@ -3,10 +3,10 @@
   'use strict';
 
   const GFI = (window.GFI = window.GFI || {});
-  if (GFI.__nsReady) return;   // 防重复求值（Logseq 可能重载 iframe）
+  if (GFI.__nsReady) return;   // 防重复求值
   GFI.__nsReady = true;
 
-  GFI.VERSION = '2.0.0';
+  GFI.VERSION = '1.0.5';
 
   GFI.DT = 1 / 60;
 
