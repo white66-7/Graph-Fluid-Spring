@@ -51,8 +51,10 @@
    * @param {Array<{source,target,label?}>} rawLinks
    * @param {object} [prev] 上一次的 GraphData —— 存活 id 的位置会被继承，
    *                        这样数据重载时图谱不会整个跳回随机位置
+   * @param {Map<string,{x:number,y:number}>} [layout] 预热布局（见 applyLayout）。
+   *        给了就在种子布局之后整体覆盖，并把命中数挂在 D.adopted 上。
    */
-  function build(rawNodes, rawLinks, prev) {
+  function build(rawNodes, rawLinks, prev, layout) {
     rawNodes = rawNodes || [];
     rawLinks = rawLinks || [];
 
@@ -302,7 +304,49 @@
       }
     }
 
+    // 预热布局必须【最后】覆盖，且只有它能把节点从种子螺旋里救出来
+    D.adopted = applyLayout(D, layout);
+
     return D;
+  }
+
+  // -------------------------------------------------------------------------
+  // 预热布局落盘 —— 把预算好的坐标灌进刚 build 出来的 D
+  // -------------------------------------------------------------------------
+  /**
+   * 用途：图谱视图打开的第一帧就显示【已经沉降完】的布局，而不是种子螺旋，
+   * 这样就不需要「先看到种子布局 → 几百毫秒后再缓动适配一次」这个中间态。
+   * 预算方见 src/warm.js（分帧跑同一个 Physics 到 alpha 睡着）。
+   *
+   * ⚠ 必须在 build() 【之后】调用：x/y 是 build 里分配的定型数组，而
+   *   this.nodes / indexById 也只有在 build 里才建好。build 会照常做一遍
+   *   螺旋种子 + 质心叠加（新节点仍然落在已有质心上），这里再把命中缓存的
+   *   节点坐标整体覆盖掉 —— 两条路径不会打架，因为覆盖发生在最后。
+   *
+   * ⚠ 速度必须清零。缓存里的坐标是「睡着时」的坐标，但用户可能在同一进程里
+   *   已经拖过节点 / 播过时间轴，D.vx / D.vy 会带着上一轮的值。不清的话，
+   *   第一帧就带着残余速度起步，布局会自己抖一下 —— 正好毁掉"一步到位"。
+   *
+   * @param {object} D build() 的产物
+   * @param {Map<string, {x:number,y:number}>} layout 节点 id → 坐标
+   * @returns {number} 真正套用到的节点数（0 = 一条都没命中，调用方应视为未命中）
+   */
+  function applyLayout(D, layout) {
+    if (!D || !layout || !layout.size || !D.n) return 0;
+    const { x, y, vx, vy } = D;
+    let hit = 0;
+    for (let i = 0; i < D.n; i++) {
+      const p = layout.get(D.id[i]);
+      if (!p) continue;
+      const px = p.x, py = p.y;
+      // 非有限值（NaN / Infinity）绝不能写进去 —— 那会让节点永远画不出来，
+      // 而且任何一次 !Number.isFinite 检查都救不回来
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      x[i] = px; y[i] = py;
+      vx[i] = 0; vy[i] = 0;
+      hit++;
+    }
+    return hit;
   }
 
   // -------------------------------------------------------------------------
@@ -405,5 +449,5 @@
     };
   }
 
-  GFI.Data = { build, applyCutoff, refreshEdgeVisibility, bounds, timeRange, centroid, stats, KIND, KIND_NAMES, seedPositions };
+  GFI.Data = { build, applyLayout, applyCutoff, refreshEdgeVisibility, bounds, timeRange, centroid, stats, KIND, KIND_NAMES, seedPositions };
 })(window.GFI);

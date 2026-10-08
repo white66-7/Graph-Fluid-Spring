@@ -28,26 +28,25 @@
     const cfg = GFI.config;
     hooks = hooks || {};
 
-    const range = GFI.Data.timeRange(D);
+    const range = GFI.Data.timeRange(D);  // 时间范围对象
 
-    const tl = {
-      range,
-      cutoff: range ? range.max : Infinity,   // = "现在"，全部可见
-      playing: false,
-      speed: 1,
-      speedIdx: 1,
-      // 🌟 播放游标：已「轮到」的节点个数（浮点）。见下面「按秩推进」。
-      rank: 0,
-      rate: 0,            // 诞生速率（节点/秒），create 期算一次
-      pacedCount: 0,      // 有时间戳的节点数 = 可被时间旅行揭示的规模
-      playDurationSec: 0, // 全程秒数 = pacedCount / rate（是【结果】，不是设定值）
-      rateAuto: false,    // true = 速率来自 Obsidian 公式（revealRate 设成 0）
+    const tl = { 
+      range,  // 时间戳
+      cutoff: range ? range.max : Infinity,   // 当前时刻
+      playing: false, 
+      speed: 1,           // 倍速
+      speedIdx: 1, 
+      rank: 0,            // 秩
+      rate: 0,            // 节点/秒
+      pacedCount: 0,      // 有时间戳的节点数
+      playDurationSec: 0, // 全程秒数
+      rateAuto: false,    // 速率自动计算
     };
 
     const _centroid = { x: 0, y: 0, k: 0 };
     let lastPulseAt = -1e9;
 
-    // 🌟 出生缓动模式（config.pop.mode）。'obsidian' 时【不注入】喷射初速、
+    //  出生缓动模式（config.pop.mode）。'obsidian' 时【不注入】喷射初速、
     //   也不加母节点后坐力 —— 实测 Obsidian 的 setData 里没有这两样。
     const obsidianMode = cfg.pop.mode === 'obsidian';
 
@@ -107,9 +106,9 @@
       a.sort((x, y) => x - y);
       return Float64Array.from(a);
     })();
-    const pacedCount = sortedTs.length;
+    const pacedCount = sortedTs.length;   // 有时间戳的节点总数
 
-    // 二分：sortedTs 中 <= ms 的元素个数 —— 该 cutoff 对应的 rank
+    // 二分：sortedTs 中 <= ms 的元素个数
     function rankUpTo(ms) {
       let lo = 0, hi = pacedCount;
       while (lo < hi) {
@@ -128,7 +127,7 @@
       return sortedTs[Math.min(pacedCount, k) - 1];
     }
 
-    // 还有没有「已判定该出现、但被额度挡在门外」的节点
+    // 还有没有已判定该出现、但被额度挡在门外的节点
     function hasPendingReveal() {
       const want = D.wantVisible, vis = D.visible;
       for (let i = 0; i < D.n; i++) if (want[i] && !vis[i]) return true;
@@ -316,25 +315,16 @@
       };
     }
 
-    // =======================================================================
     // 设置 cutoff
-    // =======================================================================
     tl.setCutoff = function setCutoff(ms, opts) {
       opts = opts || {};
-      const prevCutoff = opts.prevCutoff !== undefined ? opts.prevCutoff : tl.cutoff;
-      // 每帧揭示额度。只有播放路径会给定；拖滑块 / 切类型 / reset 必须是
-      // 即时的，传 Infinity（= 不限额）。
-      const budget = (opts.revealBudget === undefined) ? Infinity : opts.revealBudget;
-      const instantHide = !!opts.instantHide;
+      const prevCutoff = opts.prevCutoff !== undefined ? opts.prevCutoff : tl.cutoff; 
+      const budget = (opts.revealBudget === undefined) ? Infinity : opts.revealBudget;  
+      const instantHide = !!opts.instantHide; 
 
       const changed = GFI.Data.applyCutoff(D, ms);
       tl.cutoff = ms;
-      // 秩游标同步。⚠ 外部（拖滑块 / 类型开关 / reset）按二分回推即可；
-      // 播放路径【必须】自己传 opts.rank —— 回推会把同时间戳大簇的游标
-      // 一路顶到簇尾，等于整簇一次性放完，突发平滑直接失效。
       tl.rank = (opts.rank !== undefined) ? opts.rank : rankUpTo(ms);
-      // 额度没用满 ⇒ 队列里可能还压着「want=1 但 visible=0」的节点，
-      // 此时即使本帧 cutoff 没变也不能早退，否则它们永远出不来。
       if (!changed && (budget === Infinity || !hasPendingReveal())) return 0;
 
       const forward = (opts.forward !== undefined) ? opts.forward : (ms > prevCutoff);
@@ -347,9 +337,6 @@
 
       let revealed = 0, hidden = 0;
 
-      // 🌟 T1 pass A：给本帧每个新生节点找母体并按母体计数。
-      //   ⚠ 必须赶在任何 beginReveal 把兄弟置 visible=1 之前 —— 母体候选条件
-      //   是 visible[j]，这样本帧的兄弟互相看不见、谁也不会被选成母体。
       revealSlot.fill(0, 0, D.n);
       let nPending = 0;
       for (let i = 0; i < D.n; i++) {
@@ -474,21 +461,13 @@
       tl.setCutoff(range.max, { pulse: true, forward: true });
     };
 
-    // =======================================================================
     // 播放
-    // =======================================================================
     tl.setPlaying = function setPlaying(p) {
       if (!range) return;
       if (p && tl.sliderValue() >= range.duration - 1) {
+        // 上一帧
         const prev = tl.cutoff;
-        // 🌟 倒回【首个节点之前】而不是 range.min。
-        //   cutoff = range.min 的语义是「<= min 的都可见」—— 如果最早那一批
-        //   时间戳扎堆（导入簇），按秩语义下这等于一按播放就把整簇全放出来，
-        //   后面的逐帧额度根本没机会介入。cutoffAtRank(0) = range.min - 1
-        //   才是真正的「一个都还没出现」，让第一簇也走正常诞生路径。
         const start = cutoffAtRank(0);
-        // instantHide：倒带不能走淡出 —— 淡出期间节点依然 visible=1，
-        // 下一帧的揭示会从 cancelHide 分支整簇涌回来，绕开逐帧揭示额度。
         tl.setCutoff(start, { forward: false, pulse: true, instantHide: true });
         tl.setCutoff(start, { forward: true, pulse: false, prevCutoff: prev, instantHide: true });
       }
@@ -511,8 +490,6 @@
     tl.update = function update(dt, viewportWorldHeight) {
       if (!tl.playing || !range || !pacedCount) return;
 
-      // 🌟 按秩推进：本帧新增的量是【节点个数】= rate × speed × dt，
-      //   不再是毫秒。speed（0.5/1/2/4）依旧乘在这里，语义不变。
       const step = tl.rate * tl.speed * dt;
       if (step <= 0) return;
 
@@ -522,23 +499,20 @@
 
       const o = {
         forward: true, prevCutoff: prev, viewportWorldHeight, playing: true,
-        rank,                       // ⚠ 必须显式传，不能让 setCutoff 回推（见其注释）
+        rank,                       
       };
       if (cfg.timeline.burstSmoothing !== false) {
         o.revealBudget = Math.max(1, Math.ceil(step));
       }
       tl.setCutoff(next, o);
 
-      // 游标走完【且】队列排空才算结束 —— 否则最后一个大簇会被截断在半路。
       if (rank >= pacedCount && !hasPendingReveal()) {
         tl.playing = false;
         if (hooks.onPlayingChange) hooks.onPlayingChange(false);
       }
     };
 
-    // 起始状态：全部可见
     D.wantVisible.fill(1, 0, D.n);
-
     return tl;
   }
 

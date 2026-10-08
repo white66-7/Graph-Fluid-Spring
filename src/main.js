@@ -17,8 +17,8 @@
 
   let instance = null;
 
-  function createPipeline(overlay, cam, nodes, links, prevD) {
-    const D = GFI.Data.build(nodes, links, prevD);
+  function createPipeline(overlay, cam, nodes, links, prevD, layout) {
+    const D = GFI.Data.build(nodes, links, prevD, layout);
     const sim = GFI.Physics.create(D, GFI.config.physics);
     const fx = GFI.Effects.create(D, sim);
     const renderer = GFI.Renderer.create(overlay.canvas, D, cam);
@@ -40,8 +40,19 @@
     const root = GFI.Overlay.findRoot();
     if (!root) return null;
 
-    const overlay = GFI.Overlay.mount(root);
+    let nativeMode = !!cfg.useNativeGraph;
+
+    // ---- 挂载即接管 ----
+    // 一挂上就把原生画布藏掉。这是"点进去就是我的样式"的前提：只要原生图谱
+    // 还显示着，用户必然先看到它。
+    // 代价是"数据到达前画布是空的"，用 .gfi-loader 顶上（而不是让原生图谱顶）。
+    const deferTakeover = false;
+    const overlay = GFI.Overlay.mount(root, { nativeVisible: deferTakeover });
     if (!overlay) return null;
+
+    GFI.Overlay.record('overlay 挂载完成',
+      deferTakeover ? '（原生图谱继续显示）' : '（原生图谱已隐藏，等待数据）');
+    if (!deferTakeover) overlay.showLoader();
 
     const listeners = GFI.util.createListenerRegistry();
     const emitter = GFI.util.createEmitter();
@@ -67,28 +78,48 @@
     let frameCount = 0;
     let labelsOn = false;
     let labelFade = 0;              // 🌟 L3：标签层全局 alpha 补间（0..1）
-    let nativeMode = !!cfg.useNativeGraph;
     let lodLevel = 1;
     let lodForced = -1;
     let lastStats = null;
+    // 本次数据装载是不是「一步到位」的（吃到了沉降布局）。
+    // 为 true 时关掉所有相机缓动、并让标签层直接以终值出现 —— 见 setData。
+    let instantReveal = false;
+    // 当前这一轮显现淡入的总时长（ms，>0 表示淡入真的在跑）。
+    // ⚠ 不能用 instantReveal 代替它：instantReveal 说的是"布局是沉降好的"，
+    //   而"有没有淡入"取决于调用方传的 reveal（缓存命中时不淡入）。
+    //   实机日志里就因为混用而把「首帧（预热布局，无缓动）」记成了一次带淡入的
+    //   交接 —— 探针的措辞自相矛盾，排查时会被误导。
+    let revealDurMs = 0;
 
-    // ---- 延迟交接（见 boot 末尾 / setData / frame 三处）----
-    // 为什么需要：boot() 是在【数据还没到】的时候挂载的。老做法是挂上就立刻
-    // setNativeVisible(false) —— 原生图谱消失，而我们的画布是空的，于是有一段
-    // 「空白」一直持续到 fetchData 返回。冷启动第一次查库最慢，所以这段空白
-    // 只有【首次】进入图谱时看得见，表现就是"闪一下"。
-    // 现在：数据没到之前原生继续显示，我们的循环照跑（容器 display:none，
-    // 但往 canvas 上画是照样有效的），等 setData 之后画出第一帧有内容的画面，
-    // 再在【同一帧】里交接 —— 用户看不到任何中间态。
-    const deferTakeover = !!opts.deferTakeover && !nativeMode;
-    let tookOver = !deferTakeover;
-    let takeoverArmed = false;
+    // ---- 交接状态（见 setData / frame / setNativeMode 三处）----
+    // boot() 是在【数据还没到】的时候挂载的，而容器已经在显示、原生图谱已经被
+    // 藏掉（见上面的 "挂载即接管"）。所以真正要等的是：【我们画出第一帧有内容
+    // 的画面】，那一刻才把 loader 收掉 —— 一次 rAF 都不能插在中间。
+    //
+    // ⚠ 这里是两个【不同】的概念，混成一个就会出 bug：
+    //   tookOver    —— 视图归属：原生图谱是不是已经归我们了。挂载那一刻（原生
+    //                  被藏掉）就成立，因为画面已经归我们了。
+    //   loaderArmed —— 首帧待交接：画布上还没有内容、loader 正亮着，等第一帧
+    //                  有内容的画面画完再收。setData 时置位，frame 里完成。
+    //   曾经写成 tookOver 兼任两者，于是 setData 那句 `if (!tookOver)` 永远为假
+    //   → 交接永不执行 → loader 一直转（被 test/smoke-boot.js 抓到）。
+    // 老路径（deferTakeover = true）的观感是三段：原生图谱 → 我们的画布（种子
+    // 螺旋）→ 缓动适配视野。开关现在是常量 false，见文件上方挂载处的说明。
+    let tookOver = !deferTakeover || nativeMode;
+    let loaderArmed = false;
 
     // 视野缓动状态（实现见 fitView 下方的 animateFitTo / stepCamAnim）。
     // ⚠ 声明必须放在这里、而不是和那几个函数挨着：attachInteraction() 在我们
     //   定义它们【之前】就跑了，而那些 hook 闭包会引用这个变量 —— 放后面虽然
     //   靠"调用时机晚于声明"侥幸能work，但一次重排就会变成 TDZ 报错。
     let camAnim = null;
+
+    // 图谱显现时的一次淡入（见 setData 的 reveal 参数）。
+    // ⚠ 刻意【不放进 camera.js】：那个模块有一条结构性约束 —— 不暴露任何动画
+    //   方法，好让"激波"和"缩放"不可能被混淆。而且这个动画只改 canvas 的 CSS
+    //   opacity，它【不动相机】—— 相机的 fit 已经在 setData 里一次算完了。
+    let revealAnim = null;
+    let lastVisualAlpha = 1;      // 只在变化时写 style，避免每帧碰 DOM
 
     // 数据加载后自动重新适配一次视野。
     // 为什么必需：setData 里的 fitView 是在【种子布局】上算的 —— 那时节点还挤在
@@ -161,6 +192,20 @@
 
     // ---- 尺寸 ----
     let cssW = 1, cssH = 1;
+
+    // ⚠ 这里【必须】同步量一次，不能只靠 ResizeObserver。
+    //
+    //   实测（test/smoke-boot.js）：boot 期间 cam 的 W/H 一直是 Camera.create(1,1)
+    //   那个默认值，直到 setData 才被修正。原因是 overlay.onResize 的注册发生在
+    //   boot 后半段（见下面），而 boot 开头那次 fitView() 是按默认值算的 ——
+    //   于是"首帧视野"是错的，要靠 setData 里那次 fitView 再纠正一遍。
+    //   同步量掉之后 fitView 第一次就是对的，`api.fitPadding` 这类依赖视口尺寸的
+    //   计算也不会在首帧拿到错值。
+    const m0 = overlay.measure();
+    cssW = Math.max(1, m0.w | 0);
+    cssH = Math.max(1, m0.h | 0);
+    cam.resize(cssW, cssH);
+
     overlay.onResize((w, h) => {
       cssW = w; cssH = h;
       const dpr = Math.min(GFI.topWin.devicePixelRatio || 1, cfg.render.maxDpr);
@@ -252,9 +297,26 @@
     // 用绝对阈值会导致大图谱永远不显示标签。
     let fitK = 0;
 
+    /**
+     * 适配视野时的内边距（CSS px），按视口尺寸自适应。
+     *
+     * 实机数据（2026-10）：用户的图画布只有 **708 × 243**（图谱挂在侧栏里），
+     * 而 config.camera.fitPadding 是 72 —— 两边各 72，可视绘图区只剩 564 × 99！
+     * 结果图谱被压成"又小又挤"的一条，还会让 fitK 偏小、顺带把标签阈值带偏。
+     *
+     * 所以把它当成【上限】：小视口按 6% 缩，并且至少留 10px。
+     * 243 高的窗口 → 14px；800 高的窗口 → 48px；≥1200 才用满 72。
+     */
+    const FIT_PAD_LIMIT = 10;      // 两侧加起来最少要留的空间
+    function fitPad() {
+      const want = cfg.camera.fitPadding;
+      const bySize = Math.min(cam.W, cam.H) * 0.06;
+      return clamp(bySize, FIT_PAD_LIMIT, want);
+    }
+
     function fitView() {
       const b = GFI.Data.bounds(P.D, true);
-      cam.fitBounds(b, cfg.camera.fitPadding);
+      cam.fitBounds(b, fitPad());
       fitK = cam.k;
       markDirty();
     }
@@ -268,7 +330,7 @@
     //   方法，好让"激波"和"缩放"在 API 层面不可能被混淆（激波必须往模拟里注入
     //   速度，绝不能靠改相机伪装）。相机动画一旦进了那个模块，这条约束就破了。
     function animateFitTo(b, ms) {
-      const pad = cfg.camera.fitPadding;
+      const pad = fitPad();
       const w = Math.max(1, b.maxX - b.minX), h = Math.max(1, b.maxY - b.minY);
       const kx = (cam.W - 2 * pad) / w, ky = (cam.H - 2 * pad) / h;
       const k1 = clamp(Math.min(kx, ky), cfg.camera.minZoom, cfg.camera.maxZoom);
@@ -304,13 +366,30 @@
     /** 用户一动相机就放弃缓动 —— 不跟人抢镜头 */
     function cancelCamAnim() { camAnim = null; }
 
+    /**
+     * 交接：把 loader 收掉，画面正式交给我们的画布。
+     *
+     * ⚠ 只允许在【本帧已经画完】之后调用（frame 里的 loaderArmed 分支，或
+     *   setNativeMode 这种明确知道原生要回来的场合）。提前调 = 露一帧空白。
+     */
+    function completeTakeover(reason) {
+      tookOver = true;
+      loaderArmed = false;
+      overlay.hideLoader();
+      GFI.Overlay.record('画布接管（loader 收起）', reason || '');
+    }
+
     function setNativeMode(native) {
       nativeMode = !!native;
       overlay.setNativeVisible(nativeMode);
-      if (nativeMode) stopLoop();
-      else { dirty = true; startLoop(); }
-      // 手动接管即视为交接完成，别再让 frame() 去重复交接一次
-      if (!nativeMode) { tookOver = true; takeoverArmed = false; }
+      if (nativeMode) {
+        // 交还给原生图谱 —— loader 绝不能留在屏幕上（它盖在原生画布上）
+        overlay.hideLoader();
+        loaderArmed = false;
+        stopLoop();
+      } else { dirty = true; startLoop(); }
+      // 手动切回来即视为视图归属已定，别再让 frame() 去重复交接一次
+      if (!nativeMode) { tookOver = true; loaderArmed = false; }
       syncToolbar();
       emitter.emit('nativemode', nativeMode);
     }
@@ -392,7 +471,10 @@
         stepCamAnim(elapsed / 1000);
 
         // ---- 沉降后自动适配视野（见 autoFitPending 的说明）----
-        if (autoFitPending && !P.sim.isAwake() && !(P.inter && P.inter.interacted)) {
+        // ⚠ instantReveal 时整段跳过：吃到预热布局的那一次装载，setData 里的
+        //   fitView 已经是在【最终布局】上算的，再"补一次缓动"就是用户抱怨的
+        //   第③段（"接着才视角适配"）。
+        if (!instantReveal && autoFitPending && !P.sim.isAwake() && !(P.inter && P.inter.interacted)) {
           autoFitPending = false;
           const b = GFI.Data.bounds(P.D, true);
           // 只有在差异明显时才动相机，避免连续的微调抖动
@@ -403,6 +485,28 @@
             // 瞬变就是整个画面"啪"地跳一下
             animateFitTo(b, cfg.camera.fitAnimMs);
           }
+        }
+
+        // ---- 视觉层 alpha（含"从加载态显现"的一次淡入）----
+        // ⚠ 走 canvas 的 CSS opacity，不碰 renderer。
+        //   为什么：渲染器里 ctx.globalAlpha 有 13 处赋值（边按 alpha 分桶、
+        //   辉光按增益、节点按 renderAlpha...），要"整体乘一个系数"就得改那 13 处，
+        //   而且任何一个漏掉都会在淡入时露出来。CSS opacity 是一次性、整层的，
+        //   且只在首帧后那 0.3 秒里非 1 —— 代价（多一层合成）可以忽略。
+        //   这也是【唯一】让 warm 路径动起来的东西：相机不在其中，它的 fit 在
+        //   setData 里一次算完，所以不存在"接着才适配视角"。
+        let visualAlpha = 1;
+        if (revealAnim) {
+          revealAnim.t += elapsed / 1000;
+          let rp = revealAnim.t / revealAnim.dur;
+          if (!(rp < 1)) rp = 1;
+          visualAlpha = 1 - Math.pow(1 - rp, 3);        // ease-out cubic
+          if (rp >= 1) revealAnim = null;
+          markDirty();                                  // 保持循环活着（busy 含 dirty）
+        }
+        if (visualAlpha !== lastVisualAlpha) {
+          lastVisualAlpha = visualAlpha;
+          overlay.canvas.style.opacity = visualAlpha >= 1 ? '' : String(visualAlpha.toFixed(3));
         }
 
         // ---- 标签显隐 —— 🌟 随缩放【连续】淡变（Obsidian 的 text fade threshold）----
@@ -423,7 +527,9 @@
 
         // 🌟 L3：在连续目标之上再叠一层时间补间（~90ms/10%）——
         //   k 连续变化时它让淡变更顺；相机瞬变（fitView 跳转）时给出平滑过渡。
-        labelFade += (want - labelFade) * Math.min(1, elapsed * 0.011);
+        //   ⚠ instantReveal 时直接取终值：那 90ms 的淡入正是"样式还在长出来"
+        //     的那一点观感，而这一步的目标就是"点进去已经是最终样式"。
+        labelFade = instantReveal ? want : labelFade + (want - labelFade) * Math.min(1, elapsed * 0.011);
         if (labelFade < 0.001) labelFade = 0;
         else if (labelFade > 0.999) labelFade = 1;
         // ⚠ labelsOn 必须与【实际 alpha】一致（而不是 want）：want 是个极小的正数时
@@ -441,13 +547,11 @@
         });
         lastStats = stats;
 
-        // ---- 交接：画完这一帧（画布上已经有内容了）再把原生图谱藏掉 ----
+        // ---- 交接：这一帧已经画在画布上了，现在可以把 loader 收掉 ----
         // 必须是【同一帧内】完成，中间不能插一次 rAF，否则会出现
-        // 「原生已藏 / 我们还没画」的那一帧空白 —— 也就是要修的那个"闪"。
-        if (takeoverArmed) {
-          takeoverArmed = false;
-          tookOver = true;
-          overlay.setNativeVisible(false);
+        // 「loader 已收 / 画面还没出」的那一帧空白。
+        if (loaderArmed) {
+          completeTakeover(revealDurMs > 0 ? `首帧（沉降布局 + ${revealDurMs}ms 淡入）` : '首帧（沉降布局，无淡入）');
           markDirty();
         }
 
@@ -515,18 +619,40 @@
       get stats() { return lastStats; },
       get lod() { return lodLevel; },
       get root() { return root; },
+      /** 当前生效的适配内边距（CSS px）。按视口尺寸自适应，见 fitPad() */
+      get fitPadding() { return fitPad(); },
       /** 渲染层是否还挂在 DOM 上。React 重渲染会清掉我们的容器，而 root 仍然连着。 */
       get alive() { return !!(overlay && overlay.alive); },
       overlay, toolbar,
 
-      /** 全量替换数据。位置会按 id 继承，图谱不会整个跳回随机位置 */
-      setData(nodes, links) {
+      /**
+       * 全量替换数据。位置会按 id 继承，图谱不会整个跳回随机位置。
+       *
+       * @param {Array} nodes
+       * @param {Array} links
+       * @param {object} [o]
+       *        layout:Map<string,{x,y}>  沉降布局（GFI.Warm 产物）
+       *        reveal:boolean            显现时要不要淡入
+       *
+       * 给了 layout 且全部命中，这一帧画出来的就是【最终布局】，于是：
+       *   · 不需要"沉降后再适配一次视野"（那正是用户看到的第③段）
+       *   · 模拟被按到睡着，画面静止 —— 也就不存在"再摊开一次"
+       *
+       * reveal 为什么要分：布局可能来自两条不同的路。
+       *   · 后台预热缓存命中 → 用户是【重新打开】图谱，画面应该一模一样地
+       *     立刻出现，再来一次淡入反而像是"又加载了一遍"。
+       *   · 刚在 loader 后面同步跑完沉降 → 用户是【第一次】打开，从空白直接
+       *     跳到满屏 500 个点太生硬，一次 0.3 秒的淡入刚好。
+       */
+      setData(nodes, links, o) {
+        o = o || {};
         const prevD = P.D;
+        const layout = o.layout || null;
         // 拆掉旧管线：旧渲染器持有精灵缓存与测量缓存，不回收会累积泄漏
         if (P.inter) P.inter.destroy();
         if (P.fx) P.fx.destroy();
         if (P.renderer) P.renderer.destroy();
-        P = createPipeline(overlay, cam, nodes, links, prevD);
+        P = createPipeline(overlay, cam, nodes, links, prevD, layout);
         renderer = P.renderer;
         renderer.setGrid(P.sim.grid);
         renderer.setBackground(overlay.readBackground());
@@ -535,12 +661,57 @@
         renderer.setGrid(P.sim.grid);
         attachInteraction();
         attachTimeline();
-        fitView();                    // 先在种子布局上给一个大致视野
-        autoFitPending = true;        // 等沉降完再精确适配一次
-        P.sim.reheat(cfg.reheat.dataChange);
+
+        // 吃到沉降布局的判据是【全部节点都命中】。部分命中（用户刚新建了页面、
+        // 缓存还没刷新）说明库已经变了，那时按老路径即时沉降才对 —— 用一半
+        // 沉降坐标 + 一半种子螺旋拼出来的图既不是最终形态也不平滑。
+        const adopted = P.D.adopted || 0;
+        const warm = !!layout && P.D.n > 0 && adopted === P.D.n;
+
+        if (!warm && adopted > 0) {
+          console.warn(`[GFI] 沉降布局只命中 ${adopted}/${P.D.n} 个节点 —— 库已变化，本次按即时沉降走`);
+        }
+
+        instantReveal = warm;
+        revealAnim = null;
+        revealDurMs = 0;
+        // ⚠ canvas 元素是【复用】的（每次 setData 只换管线不换 DOM），所以
+        //   上一次显现留下的 opacity 必须显式清掉 —— 否则重载数据后画面会一直
+        //   停在半透明上（帧循环里那个"只在变化时写 style"的守卫会发现
+        //   lastVisualAlpha 已经是 1 而跳过写入，DOM 就永远回不来）。
+        lastVisualAlpha = 1;
+        overlay.canvas.style.opacity = '';
+        if (warm) {
+          // 按到"刚睡着"：alpha = alphaMin，速度与受力清零。
+          P.sim.reset();
+          // ⚠ 网格必须手动补一次。睡眠期没有 tick，而 tick 内部才会 chargeGrid.build
+          //   —— 不补的话渲染剔除（renderer 用 sim.grid）和命中测试全都查不到任何
+          //   节点，画面是一片空白。
+          P.sim.rebuildGrid();
+          // ⚠ 这里【必须】是 false。warm 路径下相机是在最终布局上 fit 的，一次
+          //   到位；再挂一个 autoFitPending 就等于用户说的"接着才适配视角"。
+          autoFitPending = false;
+
+          if (o.reveal) {
+            const ms = (cfg.warm && cfg.warm.revealAnimMs) || 0;
+            if (ms > 0) { revealAnim = { t: 0, dur: ms / 1000 }; revealDurMs = ms; }
+          }
+        } else {
+          autoFitPending = true;      // 等沉降完再精确适配一次
+          P.sim.reheat(cfg.reheat.dataChange);
+        }
+
+        fitView();                    // warm 时这一步已是在最终布局上算的 → 一步到位
+        GFI.Overlay.record('数据装载', warm
+          ? `沉降布局命中 ${adopted}/${P.D.n}（一步到位${o.reveal ? '，显现淡入' : '，无缓动'}）`
+          : `${P.D.n} 节点（即时沉降，adopted=${adopted}）`);
         startLoop();
-        // 数据已就位，安排交接：下一帧画完（那时画布上已经有东西了）再换过来
-        if (!tookOver) takeoverArmed = true;
+        // 数据已就位，安排交接：下一帧画完（那时画布上已经有内容了）再收起 loader。
+        // ⚠ 判据【不是】tookOver —— 视图归属在挂载那一刻就定了，这里要问的是
+        //   「loader 还亮着吗」。原生模式下 loader 是藏着的，这一句也不会把它翻出来
+        //   （completeTakeover 只会 hideLoader）。
+        loaderArmed = true;
+        return { warm, adopted, n: P.D.n };
       },
 
       setCutoff(ms) {
@@ -624,16 +795,20 @@
 
     // ---- 启动 ----
     if (nativeMode) {
+      // 用户显式选了原生图谱：原生本来就是主角，loader 绝不能亮
       overlay.setNativeVisible(true);
+      overlay.hideLoader();
       syncToolbar();
     } else if (deferTakeover) {
-      // 数据还没到：先让原生图谱继续显示着，我们这边照常 fitView + 跑循环
-      // （容器是 display:none，但往 canvas 上绘制照样有效，只是不参与合成）。
-      // 等 setData 之后画出第一帧有内容的画面，再由 frame() 交接。
+      // 老路径：数据没到之前让原生图谱继续显示
       overlay.setNativeVisible(true);
+      overlay.hideLoader();
       fitView();
       startLoop();
     } else {
+      // 新路径：原生图谱在 mount 那一刻就藏掉了，loader 已经在显示。
+      // boot 是在【数据还没到】的时候跑的，所以 setData 之前循环里画的是空画布
+      // —— 那没关系，loader 盖在上面。
       overlay.setNativeVisible(false);
       fitView();
       startLoop();
@@ -662,19 +837,23 @@
       const natToolbar = overlay.nativeToolbar;
       const out = {
         循环: { 运行中: rafId != null, 帧计数: frameCount, 原生模式: nativeMode, LOD: lodLevel },
-        // 延迟交接状态。首次进图谱时的"闪一下"就是这里没交接好：
-        // 期望看到 延迟交接=true、已交接=true、待交接=false（等数据的那段时间
-        // 已交接=false 是正常的，那时原生图谱还显示着）。
-        交接: { 延迟交接: deferTakeover, 已交接: tookOver, 待交接: takeoverArmed },
+        // 交接状态。期望看到：延迟交接=false、已交接=true、待交接=false。
+        // 待交接=true 只在「数据正在路上」那一小段里成立 —— 那时画布上还没有
+        // 内容，loader 亮着。
+        交接: {
+          延迟交接: deferTakeover, 已交接: tookOver, 待交接: loaderArmed,
+          加载指示: overlay.loaderVisible, 一步到位: instantReveal,
+        },
         尺寸: { cssW, cssH, dpr: renderer.dpr, canvasAttr: overlay.canvas.width + '×' + overlay.canvas.height },
         相机: { x: Math.round(cam.x), y: Math.round(cam.y), k: +cam.k.toFixed(4) },
-        数据: { n: P.D.n, m: P.D.m, 可见: (() => { let c = 0; for (let i = 0; i < P.D.n; i++) if (P.D.visible[i]) c++; return c; })() },
+        数据: { n: P.D.n, m: P.D.m, 采用预热坐标: P.D.adopted || 0, 可见: (() => { let c = 0; for (let i = 0; i < P.D.n; i++) if (P.D.visible[i]) c++; return c; })() },
         交互: P.inter ? {
           hover: P.inter.hoverIdx, selected: P.inter.selectedIdx,
           dragging: P.inter.dragNode, panning: P.inter.panning,
           interacted: P.inter.interacted,
         } : null,
         自动适配: { pending: autoFitPending, fitK: +fitK.toFixed(4) },
+        显现: { 淡入中: !!revealAnim, 本帧淡入时长ms: revealDurMs, canvas_opacity: overlay.canvas.style.opacity || '1' },
         模拟: { alpha: +P.sim.alpha.toFixed(5), tick: P.sim.tickCount, 网格: P.sim.grid.cols + '×' + P.sim.grid.rows },
         // 原生 Pixi 渲染器：捕获 0 个说明钩子装晚了（进图谱之前插件就已经加载过
         // 一次的那种情况），这时原生画板只是被盖住、渲染循环还在空跑
@@ -728,6 +907,14 @@
       // 画了 0 个节点才是真问题；耗时全是 0 只是计时精度不足
       if (lastStats && lastStats.nodes === 0 && out.数据.n > 0 && out.数据.可见 > 0) {
         problems.push('视口剔除后节点数为 0 —— 相机可能没对准图谱');
+      }
+      // loader 只该在「数据还没到」的那一小段里亮。它一直亮着 = 数据装载失败，
+      // 而原生图谱已经被我们藏掉了 —— 那就是一块空白，必须报出来。
+      if (out.交接.加载指示 && out.数据.n > 0 && !out.交接.待交接) {
+        problems.push('loader 还亮着但数据已经装载 —— 交接没走到，画面会停在加载态');
+      }
+      if (out.交接.加载指示 && out.数据.n === 0) {
+        notes.push('loader 亮着且数据为空 —— 数据还在路上（正常情况下只有几百毫秒）');
       }
 
       // ---- 非致命说明 ----
@@ -951,6 +1138,22 @@
         setLod: (n) => api.setLod(n),
         native: (b) => api.setNativeMode(b),
         demo: (n) => { const d = GFI.DataSource.demo(n || 400, {}); api.setData(d.nodes, d.links); },
+
+        // ---- 进图谱时序 ----
+        /** 打印「原生图谱 → 我们的画布 → 视角适配」三段的客观时间戳 */
+        timeline: () => GFI.Overlay.printEvents(),
+        timelineClear: () => GFI.Overlay.clearEvents(),
+
+        // ---- 布局预热 ----
+        /** 预热器状态：有没有现成的布局缓存、最近一次跑了多久多少 tick */
+        warm: () => (GFI.Warm ? GFI.Warm.state() : null),
+        /** 手动重跑一次预热（改完布局参数后想立刻验证"打开即最终形态"就用它） */
+        prewarm: () => (GFI.Warm ? GFI.Warm.prewarm({
+          source: (cfg.runtime||{}).dataSource, demoCount: (cfg.runtime||{}).demoCount,
+          log: (m) => console.log('[GFI]', m),
+        }) : null),
+        /** 丢掉预热缓存（下次进图谱会即时沉降，用来做 A/B 对照） */
+        unwarm: () => { if (GFI.Warm) GFI.Warm.invalidate('__GFI__.unwarm()'); return true; },
       };
     } catch (e) {}
 

@@ -372,8 +372,41 @@
       idleFrames: 30,   // 每30帧做退化检测
       degenerateCheckEvery: 30,
       debug: false,
+      // 数据来源：'logseq' = 查真实库，'demo' = 合成图。
+      // ⚠ 这两个键一直挂在这里，而所有读者都写成 `GFI.config.dataSource`
+      //   —— 一层读错，永远读到 undefined。后果不是崩，而是**静默走默认值**：
+      //   把 dataSource 改成 'demo' 毫无反应；那段 `预热启动 source=undefined`
+      //   的实机日志就是这么来的。
+      //   修法是把读者改成 `GFI.config.runtime.xxx`（不改这里的路径）——
+      //   配置结构一动，用户存档里的键名就全对不上了。
       dataSource: 'logseq',
       demoCount: 400,
+    },
+
+    // 布局预热（见 src/warm.js）
+    warm: {
+      // 开关。开着 = 插件加载后就在后台把力导向跑到底，进图谱时第一帧就是
+      // 最终布局；关掉 = 省下那点 CPU，代价是进图谱时能看见图谱当场"摊开"。
+      enabled: true,
+      // 后台预热一帧给物理多少毫秒。调大 = 更快跑完、更快"点开就是最终形态"，
+      // 代价是插件刚加载那几秒主线程更紧（实测 500 节点整段沉降约 2 秒）。
+      budgetMs: 26,
+      // 进图谱时【同步抢跑】的时间上限（ms）。后台预热没跑完时，在加载指示
+      // 后面把剩下的沉降一次跑完 —— 此刻画布上什么都没有，阻塞不影响已显示
+      // 的东西。
+      // ⚠ 要给死上限的依据（test/warm-cost.js 实测）：整段沉降
+      //     200 节点 ≈0.5s　500 节点 ≈2.0s　1000 节点 ≈7.2s
+      //   所以"能全部跑完"只对中小库成立。300ms ≈ 让 500~700 节点以内的库
+      //   一步到位；更大的库会超预算回退（仍然会看到图谱当场摊开），
+      //   那时靠后台预热把第二次之后的开图救回来。
+      syncSettleMs: 300,
+      // 上限 = settleTicks × 这个倍率。实测 371 tick 就睡着了（settleTicks=400），
+      // 所以它平时用不到，只在"alpha 掉不下去"的异常库上兜底。
+      maxTicksFactor: 2.5,
+      // 图谱显现的那一下用多久淡入（ms）。0 = 直接跳出来。
+      // 只作用于「刚在 loader 后面跑完沉降」的那一次（首次进图谱）；
+      // 之后走缓存的重开是静止的，不会有第二次淡入。
+      revealAnimMs: 320,
     },
   };
 
@@ -390,155 +423,17 @@
   GFI.config = clone(defaults);
   GFI.configDefaults = defaults;
 
+  // =========================================================================
   // Logseq 设置面板 schema
-  GFI.settingsSchema = [
-    {
-      key: 'useNativeGraph',
-      type: 'boolean',
-      title: '🔄 使用原生图谱 / Use Native Graph',
-      description: '回退到 Logseq 内置的图谱视图。\nFall back to Logseq\'s built-in graph.',
-      default: false,
-    },
-    // 自定义 Journal 系统节点
-    {
-      key: 'hideSystemJournal',
-      type: 'boolean',
-      title: '📅 删去 Journal 系统节点 / Hide Journal System Node',
-      description: '是否从图谱中删去 Journal 系统节点（默认关：不删，保留展示）。\nDelete/hide the Journal system node? (default false: keep)',
-      default: false,
-    },
-    // 自定义 Page/Pages 系统节点
-    {
-      key: 'hideSystemPages',
-      type: 'boolean',
-      title: '📄 删去 Page/Pages 系统节点 / Hide Page System Node',
-      description: '是否从图谱中删去 Page / Pages 系统节点（默认关：不删，保留展示）。\nDelete/hide the Page/Pages system node? (default false: keep)',
-      default: false,
-    },
-    // 自定义过滤其他节点名称
-    {
-      key: 'hideNames',
-      type: 'string',
-      input: 'textarea',
-      title: '🚫 自定义过滤名称 / Custom Excluded Names',
-      description: '填入需过滤的节点名称，用逗号或换行分隔。',
-      default: '',
-    },
-    {
-      key: 'charge',
-      type: 'number',
-      title: '⚡ 斥力强度 / Repulsion',
-      description: '节点之间的排斥力，决定整体疏密。(default -0.12)',
-      default: -0.12,
-    },
-    {
-      key: 'linkDistance',
-      type: 'number',
-      title: '🔗 连接线长度 / Link Distance',
-      description: '相连节点之间的静止距离。(default 45)',
-      default: 45,
-    },
-    {
-      key: 'velocityRetain',
-      type: 'number',
-      title: '🌀 速度保留率 / Velocity Retain',
-      description: '每帧保留多少速度。(default 0.80)',
-      default: 0.8,
-    },
-    {
-      key: 'settleTicks',
-      type: 'number',
-      title: '⏱ 活跃时长 / Settle Duration',
-      description: '图谱从开始布局到完全静止经过多少帧。(default 400)',
-      default: 400,
-    },
-    {
-      key: 'linkBoost',
-      type: 'number',
-      title: '🧲 拖动带动邻域 / Neighbour Pull',
-      description:
-        '拖动节点时邻居跟随的力度。只作用于被拖节点自己的连线，图的其他部分不受影响。\n' +
-        '调高 = 邻域跟得更紧、图不易被扯变形；调低 = 邻居基本不动。\n' +
-        '实测 16 最优；超过 24 有让布局发散的风险。(default 16)',
-      default: 16,
-    },
-    {
-      key: 'releaseAlpha',
-      type: 'number',
-      title: '🪂 松手停位 / Drop Firmness',
-      description:
-        '松手后布局的活跃度。数值越低，节点越能停在你放下的地方；\n' +
-        '越高则越会被连线拉回原来的位置。实测 0.05 最优，低于 0.02 图会僵住收不回来。(default 0.05)',
-      default: 0.05,
-    },
-    {
-      key: 'popAmp',
-      type: 'number',
-      title: '💥 节点弹出幅度 / Pop Overshoot',
-      description: '新节点出现时向外过冲的幅度。(default 0.55)',
-      default: 0.55,
-    },
-    {
-      key: 'popZeta',
-      type: 'number',
-      title: '💥 弹出阻尼比 / Pop Damping',
-      description: '越低回弹次数越多。(default 0.30)',
-      default: 0.30,
-    },
-    {
-      key: 'shockMagnitude',
-      type: 'number',
-      title: '🌊 时间波强度 / Shockwave',
-      description: '时间轴推进时，向外扩散的斥力波前强度。设为 0 可完全关闭。(default 0)',
-      default: 0,
-    },
-    {
-      key: 'timelapseRate',
-      type: 'number',
-      title: '⏳ 演变节奏 / Timelapse Rate',
-      description: '每秒出现多少个节点。越小越慢 —— 调大到「同时只有一个节点在做出生动画」最舒服。\n' +
-        '全程时长 = 节点数 ÷ 这个值，所以节点多的时候会很久，嫌久就调大。\n' +
-        'Nodes revealed per second. Lower = slower. Total time = nodeCount / rate.',
-      default: 1,
-    },
-    {
-      key: 'labelMaxRatio',
-      type: 'number',
-      title: '🏷 标签密度 / Label Density',
-      description: '多少比例的节点有资格显示名字（1 = 全部，密集处自动让位）。(default 1)',
-      default: 1,
-    },
-    {
-      key: 'labelJournal',
-      type: 'boolean',
-      title: '📅 显示日记名字 / Journal Labels',
-      description: '日记节点旁是否显示名字标签（默认关：日记只显示圆点，悬浮时仍可见）。\nShow name labels on journal nodes? (default false: dots only, hover to see names)',
-      default: false,
-    },
-    {
-      key: 'labelYield',
-      type: 'boolean',
-      title: '🈳 标签重叠时让位 / Hide Overlapping Labels',
-      description:
-        '关闭（默认，与 Obsidian 一致）= 每个节点都显示名字，允许互相重叠；\n' +
-        '密集处靠「放大才显示」控制，也就是缩小后文字自然消失。\n' +
-        '开启 = 重叠的标签互相让位，同一块地方只留最重要的那个 —— \n' +
-        '画面更干净，但会有很多节点永远看不到名字。\n' +
-        'Hide overlapping labels? Off = Obsidian behaviour (all names shown, may overlap).',
-      default: false,
-    },
-    {
-      key: 'nodeSize',
-      type: 'number',
-      title: '🔵 节点大小 / Node Size',
-      description:
-        '节点圆点的大小倍率。调大 = 图看起来更密，且【完全不改动布局】——' +
-        '它和「连接线长度」是两个正交的旋钮：线长决定间距，这里决定直径。' +
-        '范围 0.5~2.5,超过 2.5 节点会被碰撞顶开、反而变松。(default 1.0)',
-      default: 1.0,
-    },
-  ];
-
+  // =========================================================================
+  // ⚠ 文案与结构分离：所有 title / description 都在 src/i18n.js 里，按语言给出
+  //   { zh, en } 两版；这里只负责把它们编译成当前语言的 schema。
+  //
+  // ⚠⚠ 必须在【生成 schema 之前】把默认值绑到 configDefaults。
+  //   旧代码是先写死 schema.default（linkDistance: 45、velocityRetain: 0.8…），
+  //   再用 SCHEMA_BINDINGS 循环覆盖一次 —— 结果面板上显示的默认值、描述里写的
+  //   数字、和真正生效的值是【三套】。用户看到的就是"改了没反应 / 值跟我设的
+  //   不一样"。现在先算绑定，再生成 schema，只留一处真值来源。
   const SCHEMA_BINDINGS = {
     charge: () => GFI.configDefaults.physics.charge,
     linkDistance: () => GFI.configDefaults.physics.linkDistance,
@@ -557,14 +452,36 @@
     hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
     hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
     hideNames: () => GFI.configDefaults.data.hideNames.join(', '),
+    // 本轮新增：预热相关的三个旋钮
+    prewarm: () => GFI.configDefaults.warm.enabled,
+    syncSettleMs: () => GFI.configDefaults.warm.syncSettleMs,
+    revealAnimMs: () => GFI.configDefaults.warm.revealAnimMs,
+    // 语言：默认中文
+    language: () => '中文',
+    // ⚠ useNativeGraph 已从设置面板【删除】（用户要求：这个开关没用了）。
+    //   `config.useNativeGraph` 与 `main.js` 里的原生模式回退逻辑仍然保留，
+    //   只是不再有 UI 入口 —— syncSettings 里 `c.useNativeGraph = !!s.useNativeGraph`
+    //   在键不存在时得到 false，也就是"始终用我们的图谱"。
   };
-  for (const item of GFI.settingsSchema) {
-    const bind = SCHEMA_BINDINGS[item.key];
-    if (bind) item.default = bind();
-  }
 
-  // 🌟 14：日记标签默认关闭（labelJournal = false）
-  GFI.CFG_VERSION = 14;
+  // 先把默认值写回 i18n 的条目表，再编译成 schema
+  const i18n = GFI.i18n;
+  if (!i18n) {
+    console.error('[GFI] src/i18n.js 未加载 —— 检查 index.html 的脚本顺序');
+  } else {
+    for (const item of i18n.SCHEMA) {
+      const bind = SCHEMA_BINDINGS[item.key];
+      if (bind) item.default = bind();
+    }
+  }
+  GFI.settingsSchema = i18n ? i18n.schema() : [];
+  GFI.SCHEMA_BINDINGS = SCHEMA_BINDINGS;
+
+  // 日记标签默认关闭
+  // ⚠ 15：新增 language / prewarm / syncSettleMs / revealAnimMs 四个键。
+  //   CFG_VERSION 一变，syncSettings 会走 fresh 分支 —— 新键直接取默认值，
+  //   老存档里没有它们不会变成 undefined。
+  GFI.CFG_VERSION = 15;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -577,9 +494,13 @@
     linkBoostDamp: (v) => v > 0.05 && v < 1,
     releaseAlpha: (v) => v >= 0.02 && v <= 1,
     shockMagnitude: (v) => v >= 0 && v <= 2000,
-    timelapseRate: (v) => v >= 0.05 && v <= 200,
+    timelapseRate: (v) => v >= 0 && v <= 200,
     labelMaxRatio: (v) => v > 0 && v <= 1,
     nodeSize: (v) => v >= 0.5 && v <= 2.5,
+    // 预热相关（本轮新增）。⚠ 没有区间之前它们是"设多少就按多少"——
+    // 一个手抖的 999999 会让进图谱时同步阻塞十几秒。
+    syncSettleMs: (v) => v >= 0 && v <= 5000,
+    revealAnimMs: (v) => v >= 0 && v <= 2000,
   };
 
   GFI.syncSettings = function syncSettings(s) {
@@ -605,6 +526,38 @@
     };
 
     c.useNativeGraph = !!s.useNativeGraph;
+
+    // ---- 语言 ----
+    // ⚠ 语言【不参与 fresh 判定】—— 它跟物理参数无关，升级 CFG_VERSION 不该
+    //   把用户选好的语言重置回中文。
+    //
+    // ⚠⚠ 这里必须显式回写 `s.language` 一份【规范形态】。
+    //   实机反馈「上次选了英文，这次进去还是中文」，根因是 Logseq 的 enum 控件
+    //   可能把选择存成索引（0/1）或别的形态，而我们读的时候只认字符串。
+    //   i18n.normalize() 现在两种都吃，但为了不再依赖"Logseq 到底存了什么"，
+    //   我们把归一化后的值按 enumChoices 的文案写回设置（'中文' / 'English'）——
+    //   下次启动无论走哪条路读到的都是同一种形态。
+    if (GFI.i18n) {
+      const langCode = GFI.i18n.set(s.language);           // 归一化并生效
+      const idx = GFI.i18n.LANGS.indexOf(langCode);
+      const canonical = GFI.i18n.ENUM_CHOICES[idx >= 0 ? idx : 0];
+      if (s.language !== canonical) {
+        s.language = canonical;                             // 顺手纠正存档
+        try {
+          if (typeof window !== 'undefined' && window.logseq && window.logseq.updateSettings) {
+            window.logseq.updateSettings({ language: canonical });
+          }
+        } catch (e) { /* 写不进去也不影响本次生效 */ }
+      }
+      GFI.__langDiag = { 存档原始值: s.__langRaw, 归一化: langCode, 写回: canonical };
+    }
+
+    // ---- 布局预热 ----
+    // ⚠ prewarm 的默认值是 true，所以【不能】用 !!s.prewarm：老存档里没有这个键，
+    //   !!undefined === false，会把默认开着的东西静默关掉。
+    c.warm.enabled = fresh ? d.warm.enabled : (s.prewarm === undefined ? d.warm.enabled : !!s.prewarm);
+    c.warm.syncSettleMs = pick('syncSettleMs', d.warm.syncSettleMs);
+    c.warm.revealAnimMs = pick('revealAnimMs', d.warm.revealAnimMs);
 
     c.physics.charge = pick('charge', d.physics.charge);
     c.physics.linkDistance = pick('linkDistance', d.physics.linkDistance);

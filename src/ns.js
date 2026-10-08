@@ -50,6 +50,14 @@
 
   const now = () => topWin.performance.now();
 
+  // rAF 取宿主窗口的。
+  // ⚠ 不能用插件 iframe 自己的 requestAnimationFrame：宿主页面被切到后台 /
+  //   iframe 被判定为不可见时，iframe 的 rAF 会整体停摆。预热器（src/warm.js）
+  //   用的就是它，停摆的表现是「回到前台后预热的 Promise 永远不 resolve」。
+  //   topWin 这边至少是"页面可见性"这一个真实信号。
+  const raf = (cb) => topWin.requestAnimationFrame(cb);
+  const caf = (id) => topWin.cancelAnimationFrame(id);
+
   // 对称随机偏移 [-a, +a)，由 hash 驱动，可复现
   const jitter = (i, seed, a) => (hash11s(i, seed) - 0.5) * 2 * a;
 
@@ -115,7 +123,7 @@
 
   // 导出
   GFI.util = {
-    clamp, clamp01, lerp, hash11, hash11s, jitter, now,
+    clamp, clamp01, lerp, hash11, hash11s, jitter, now, raf, caf,
     hexToRgb, rgbaPrefix,
     createEmitter, createListenerRegistry,
   };

@@ -608,6 +608,23 @@
 
     sim.setAlphaTarget = function setAlphaTarget(a) { sim.alphaTarget = a; };
 
+    /**
+     * 把模拟按到「刚入睡」的状态：alpha 回到 alphaMin、速度与受力清零。
+     *
+     * 用途见 src/warm.js：预热器把同一个物理跑到底、取出坐标，接管方再用这套
+     * 坐标重建管线。重建出来的 sim 是从 alpha=1 起步的 —— 不按一下的话，
+     * 第一帧之后图谱会从「已经沉降好的布局」再往下塌一次，正好毁掉
+     * 「打开即最终形态」。alphaTarget 一并归零：拖拽路径会把它抬到 0.3，
+     * 残留的话新图会一直醒着（同 main.js 空闲停机那条约束）。
+     */
+    sim.reset = function reset() {
+      sim.alpha = sim.alphaMin;
+      sim.alphaTarget = 0;
+      zeroForces();
+      vx.fill(0, 0, n);
+      vy.fill(0, 0, n);
+    };
+
     sim.pin = function pin(i, px, py) {
       if (i < 0 || i >= n) return;
       pinMode[i] = PIN_HARD;
@@ -636,12 +653,6 @@
     sim.rebuildGrid = function rebuildGrid() {
       updateActiveMask();
       chargeGrid.build(D, activeMask);
-    };
-
-    sim.reset = function reset() {
-      zeroForces();
-      vx.fill(0, 0, n);
-      vy.fill(0, 0, n);
     };
 
     return sim;

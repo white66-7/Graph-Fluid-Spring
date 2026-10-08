@@ -58,7 +58,7 @@ function load(rel) {
   vm.runInContext(code, sandbox, { filename: rel });
 }
 
-for (const f of ['ns', 'config', 'spatial', 'data', 'physics', 'effects', 'timeline', 'datasource']) {
+for (const f of ['ns', 'i18n', 'config', 'spatial', 'data', 'physics', 'effects', 'timeline', 'datasource', 'warm']) {
   load(`src/${f}.js`);
 }
 
@@ -1693,6 +1693,375 @@ section('18. 时间线节奏 —— 按秩推进 + 每帧揭示额度');
     T.revealRate = keepRate;
   })();
   T.revealRate = saved.rate; T.burstSmoothing = saved.burst;
+})();
+
+// ===========================================================================
+// 19. 预热布局 —— 「点进去就是最终形态」的物理前提
+// ===========================================================================
+// 守的是 src/warm.js + GFI.Data.applyLayout + sim.reset() 这条新通路。
+// 进图谱的观感问题（原生图谱 → 种子螺旋 → 缓动适配视野）在无头环境里
+// 量不到，但它【依赖的那条物理通路】可以在这里逐位对账：
+//
+//   ① 预热跑到底之后，按 id 取出来的坐标必须能【精确】还原到新 build 出来的 D
+//      上 —— 差一个 bit 都意味着第一帧和"最终形态"不是同一张图，
+//      那么用户看到的就仍然是"先一个样、再变成另一个样"。
+//   ② 灌完坐标之后模拟必须【睡着】。醒着的话第一帧之后图谱会继续塌，
+//      于是"一步到位"变成"一步到位之后再动一下"。
+//   ③ 睡着之后网格必须仍然收录所有节点。睡眠期没有 tick、也就没有
+//      chargeGrid.build，而渲染剔除与命中测试都查这张网格 ——
+//      不补 rebuildGrid 的后果是【整张图一个节点都不画】（空白画布）。
+(function testWarmLayout() {
+  const demo = GFI.DataSource.demo(200, { seed: 23 });
+
+  // ---- 预热方：跑到底，按 id 取出坐标（复刻 src/warm.js 的做法）----
+  const D0 = GFI.Data.build(demo.nodes, demo.links, null);
+  const sim0 = GFI.Physics.create(D0, GFI.config.physics);
+  const maxTicks = Math.ceil(GFI.config.physics.settleTicks * 2.5);
+  let t = 0;
+  while (sim0.isAwake() && t < maxTicks) { sim0.tick(DT); t++; }
+  check('预热能在上限内睡着（否则缓存里是一张没沉降完的图）',
+    !sim0.isAwake(), `${t} tick（上限 ${maxTicks}）alpha=${sim0.alpha.toExponential(2)}`);
+
+  const layout = new Map();
+  for (let i = 0; i < D0.n; i++) layout.set(D0.id[i], { x: D0.x[i], y: D0.y[i] });
+
+  // 顺带把包围盒与种子布局做个对照 —— 这就是"②③两段观感"的量化来源
+  const bbSettled = GFI.Data.bounds(D0, false);
+  const Dseed = GFI.Data.build(demo.nodes, demo.links, null);   // 不灌 → 种子螺旋
+  const bbSeed = GFI.Data.bounds(Dseed, false);
+  const wSettled = bbSettled.maxX - bbSettled.minX, wSeed = bbSeed.maxX - bbSeed.minX;
+  check('前提：种子布局与沉降布局的尺度确实差很多（否则那两段观感无从谈起）',
+    wSettled > wSeed * 1.5,
+    `种子宽 ${wSeed.toFixed(0)} → 沉降宽 ${wSettled.toFixed(0)}（${(wSettled / wSeed).toFixed(2)}×）`);
+
+  // ---- 接管方：重建管线时把坐标灌进去 ----
+  const D1 = GFI.Data.build(demo.nodes, demo.links, null, layout);
+  check('全部节点都命中预热坐标', D1.adopted === D1.n, `${D1.adopted}/${D1.n}`);
+
+  let maxDelta = 0, nan = 0;
+  for (let i = 0; i < D1.n; i++) {
+    const p = layout.get(D1.id[i]);
+    const d = Math.abs(D1.x[i] - p.x) + Math.abs(D1.y[i] - p.y);
+    if (d > maxDelta) maxDelta = d;
+    if (!Number.isFinite(D1.x[i]) || !Number.isFinite(D1.y[i])) nan++;
+  }
+  check('① 灌进来的坐标与预热结果逐位一致', maxDelta === 0, `最大偏差 ${maxDelta}`);
+  check('① 没有非有限坐标（applyLayout 的防御没被绕过）', nan === 0, `NaN=${nan}`);
+
+  // ---- 速度必须清零 ----
+  // 上一轮用过的 D 会带着残余速度（拖拽 / 时间轴都会写 vx/vy）。不清的话
+  // 第一帧就带着速度起步，画面会自己抖一下。
+  let maxVel = 0;
+  for (let i = 0; i < D1.n; i++) maxVel = Math.max(maxVel, Math.abs(D1.vx[i]), Math.abs(D1.vy[i]));
+  check('① 速度全部归零（不会带着上一轮的余速起步）', maxVel === 0, `最大 |v| = ${maxVel}`);
+
+  // ---- ② 模拟必须睡着 ----
+  const sim1 = GFI.Physics.create(D1, GFI.config.physics);
+  check('前提：新建的 sim 是从 alpha=1 醒着起步的（不 reset 就会继续塌）',
+    sim1.isAwake() && Math.abs(sim1.alpha - 1) < 1e-9, `alpha=${sim1.alpha}`);
+  sim1.reset();
+  check('② reset 之后模拟睡着', !sim1.isAwake(), `alpha=${sim1.alpha}`);
+  check('② reset 把 alphaTarget 也归零（残留会让图永远醒着）',
+    sim1.alphaTarget === 0, `alphaTarget=${sim1.alphaTarget}`);
+
+  // ---- ③ 睡眠期网格必须能查到所有节点 ----
+  // 复刻 main.js setData 里 warm 分支的调用顺序：reset → rebuildGrid
+  sim1.rebuildGrid();
+  check('③ reset 之后位置没被动过（首帧画的就是最终形态）', (() => {
+    let d = 0;
+    for (let i = 0; i < D1.n; i++) {
+      const p = layout.get(D1.id[i]);
+      d = Math.max(d, Math.abs(D1.x[i] - p.x) + Math.abs(D1.y[i] - p.y));
+    }
+    return d === 0;
+  })());
+
+  const buf = new Int32Array(D1.n);
+  const bb = GFI.Data.bounds(D1, false);
+  const found = sim1.grid.collectRect(D1, bb.minX - 1, bb.minY - 1, bb.maxX + 1, bb.maxY + 1, buf, D1.visible);
+  check('③ 睡眠期网格收录全部节点（否则剔除会把整张图滤成 0 个）',
+    found === D1.n, `网格 ${found}/${D1.n}`);
+
+  // ---- 边界：给一份对不上的 layout，必须【部分命中】而不是崩 ----
+  // index.js 的判据是 adopted === n 才算"一步到位"；这里守的是另一半：
+  // 库变了（新增页面）时 applyLayout 只命中一部分，绝不能抛错、也不能
+  // 把没命中的节点写成 NaN。
+  const layout2 = new Map(layout);
+  layout2.delete(String(demo.nodes[0].id));
+  layout2.set('完全不存在的新节点', { x: 123, y: 456 });
+  const D2 = GFI.Data.build(demo.nodes, demo.links, null, layout2);
+  check('部分命中：命中数 = n-1，且调用方能据此拒绝"一步到位"',
+    D2.adopted === D2.n - 1, `adopted=${D2.adopted}/${D2.n}`);
+  let bad = 0;
+  for (let i = 0; i < D2.n; i++) if (!Number.isFinite(D2.x[i]) || !Number.isFinite(D2.y[i])) bad++;
+  check('部分命中：漏掉的那个节点落回种子坐标（不是 NaN）', bad === 0, `非有限 ${bad}`);
+
+  // ---- 边界：layout 里带 NaN 的条目必须被跳过 ----
+  const layout3 = new Map();
+  for (const [id, p] of layout) layout3.set(id, p);
+  layout3.set(D1.id[0], { x: NaN, y: 0 });
+  const D3 = GFI.Data.build(demo.nodes, demo.links, null, layout3);
+  check('layout 里的 NaN 条目被跳过（写进去就永远画不出来）',
+    D3.adopted === D3.n - 1 && Number.isFinite(D3.x[0]), `adopted=${D3.adopted}`);
+})();
+
+// ===========================================================================
+// 20. 设置面板：双语 schema + 默认值单一来源
+// ===========================================================================
+// 守两件事：
+//  ① 每一屏文案两套语言齐全，且两种语言编译出来的 schema 结构完全一致
+//     （漏翻一条就会在面板上露出空白或另一种语言）
+//  ② 每个 schema 条目都有绑定到 configDefaults 的默认值 ——
+//     旧代码里 schema.default 是写死的（linkDistance: 45），而真值是 50，
+//     于是面板显示、描述文字、实际生效是【三套】。这条断言就是为了防止
+//     再有人把默认值写回 schema 字面量里。
+(function testSettingsI18n() {
+  const i18n = GFI.i18n;
+  check('i18n 模块已加载', !!i18n && typeof i18n.schema === 'function');
+
+  const missing = i18n.audit();
+  check('两套语言的 title/description(含 short) 都齐全', missing.length === 0,
+    missing.length ? missing.slice(0, 6).join(' / ') : `${i18n.SCHEMA.length} 条全齐`);
+
+  // ⚠ 面板高度直接由描述长度决定。实机实测：22 条长描述把 Logseq 主内容区
+  //   撑到 scrollHeight 10572px、而可视高度只有 286px —— 用户滚不到下面的项。
+  //   所以面板上只用 short，并在这里卡一个长度上界防止它再长回去。
+  const tooLong = i18n.SCHEMA.filter((e) => !e.short).map((e) => e.key);
+  check('每条都有 short（面板专用短描述）', tooLong.length === 0,
+    tooLong.length ? '缺 short: ' + tooLong.join(', ') : '');
+
+  const zhSchema = i18n.schema(i18n.SCHEMA);
+  const over = zhSchema.filter((e) => String(e.description || '').length > 130)
+    .map((e) => `${e.key}(${String(e.description).length})`);
+  check('面板描述都 ≤130 字（否则把设置面板撑得滚不到底）', over.length === 0,
+    over.length ? over.join(' ') : `最长 ${Math.max(...zhSchema.map((e) => String(e.description || '').length))} 字`);
+
+  const zh = i18n.schema(i18n.SCHEMA);
+  const en = i18n.schema(i18n.SCHEMA);
+
+  check('语言选项排在第一位（用户第一眼要做的选择）',
+    zh[0] && zh[0].key === 'language', `第一条是 ${zh[0] && zh[0].key}`);
+  check('语言选项有两个选择', JSON.stringify(zh[0].enumChoices) === JSON.stringify(['中文', 'English']),
+    JSON.stringify(zh[0].enumChoices));
+
+  check('两种语言的条目数一致', zh.length === en.length && zh.length > 20,
+    `zh=${zh.length} en=${en.length}`);
+
+  const keysZh = zh.map((e) => e.key).join(',');
+  const keysEn = en.map((e) => e.key).join(',');
+  check('两种语言的键名与顺序完全一致', keysZh === keysEn, keysZh === keysEn ? '' : `${keysZh}\n≠ ${keysEn}`);
+
+  // 真正切到 en 之后 title 必须变（否则等于没翻）
+  let zhTitle, enTitle;
+  i18n.set('zh'); zhTitle = i18n.schema()[1].title;
+  i18n.set('en'); enTitle = i18n.schema()[1].title;
+  i18n.set('zh');
+  check('切换语言后 title 真的变了', zhTitle !== enTitle, `zh="${zhTitle}" en="${enTitle}"`);
+
+  // 语言归一化：存档里可能是【字符串】也可能是 Logseq enum 的【索引】
+  // —— 实机「上次选了英文，这次进去还是中文」最可能就是索引形态没被识别。
+  check('语言归一化能吃下字符串形态',
+    i18n.normalize('EN') === 'en' && i18n.normalize('English') === 'en' &&
+    i18n.normalize('zh-CN') === 'zh' && i18n.normalize('乱七八糟') === 'zh');
+  check('语言归一化能吃下 enum 索引形态（0=中文 1=English）',
+    i18n.normalize(1) === 'en' && i18n.normalize(0) === 'zh' &&
+    i18n.normalize('1') === 'en' && i18n.normalize('0') === 'zh',
+    `1→${i18n.normalize(1)} 0→${i18n.normalize(0)} '1'→${i18n.normalize('1')}`);
+  check('语言归一化能吃下 enumChoices 的原文',
+    i18n.normalize('English') === 'en' && i18n.normalize('中文') === 'zh');
+  check('ENUM_CHOICES 与 LANGS 顺序一一对应（normalize 的索引映射靠它）',
+    i18n.ENUM_CHOICES.length === i18n.LANGS.length &&
+    i18n.normalize(i18n.ENUM_CHOICES.indexOf('English')) === 'en' &&
+    i18n.normalize(i18n.ENUM_CHOICES.indexOf('中文')) === 'zh',
+    JSON.stringify(i18n.ENUM_CHOICES) + ' vs ' + JSON.stringify(i18n.LANGS));
+
+  // ---- ② 默认值单一来源 ----
+  const bind = GFI.SCHEMA_BINDINGS || {};
+  const noBind = zh.filter((e) => e.key !== 'language' && !bind[e.key]).map((e) => e.key);
+  check('每个条目都绑定了 configDefaults（不许在 schema 里写死默认值）',
+    noBind.length === 0, noBind.length ? '缺绑定: ' + noBind.join(', ') : `${Object.keys(bind).length} 个绑定`);
+
+  const d = GFI.configDefaults;
+  check('linkDistance 的面板默认值 = 实际生效值（旧代码写死 45，真值 50）',
+    zh.find((e) => e.key === 'linkDistance').default === d.physics.linkDistance,
+    `面板 ${zh.find((e) => e.key === 'linkDistance').default} vs 真值 ${d.physics.linkDistance}`);
+  check('velocityRetain 的面板默认值 = 实际生效值（旧代码写死 0.8，真值 0.6）',
+    zh.find((e) => e.key === 'velocityRetain').default === d.physics.velocityRetain,
+    `面板 ${zh.find((e) => e.key === 'velocityRetain').default} vs 真值 ${d.physics.velocityRetain}`);
+  check('新增的预热开关也已接线',
+    zh.find((e) => e.key === 'prewarm').default === d.warm.enabled &&
+    zh.find((e) => e.key === 'syncSettleMs').default === d.warm.syncSettleMs &&
+    zh.find((e) => e.key === 'revealAnimMs').default === d.warm.revealAnimMs);
+
+  // ---- ③ language / warm.* 真的能从设置走通 ----
+  // ⚠⚠ 先守一条回归：schema 必须按【当前语言】重新编译，不能复用加载时的快照。
+  //   这正是实机「存档是英文、界面还是中文」的根因 ——
+  //   index.js 原来是先 `useSettingsSchema(GFI.settingsSchema)`（config.js 加载时
+  //   按默认语言编译的快照）再 applySettings（才读到 language）。
+  {
+    const keepL = i18n.get();
+    try {
+      i18n.set('zh');
+      const snapZh = i18n.schema();                 // 模拟 config.js 加载时的快照
+      i18n.set('en');                               // 模拟 applySettings 读到了 English
+      const fresh = i18n.schema();                  // ← registerSettingsSchema 做的就是这件事
+      check('⚠ 按当前语言重新编译后拿到英文（不能沿用加载时的中文快照）',
+        fresh[1].title === i18n.t(i18n.SCHEMA[1].title, 'en') && fresh[1].title !== snapZh[1].title,
+        `${snapZh[1].title} → ${fresh[1].title}`);
+      check('重新编译后所有条目标题都是英文',
+        fresh.every((e, i) => e.title === i18n.t(i18n.SCHEMA[i].title, 'en')),
+        `${fresh.length} 条`);
+    } finally {
+      i18n.set(keepL);
+    }
+  }
+
+  const keepLang = i18n.get();
+  const keepWarm = JSON.stringify(GFI.config.warm);
+  try {
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION, language: 'English', prewarm: false, syncSettleMs: 456, revealAnimMs: 0 });
+    check('设置里选 English ⇒ i18n 真的切过去了', i18n.get() === 'en', `lang=${i18n.get()}`);
+    check('关掉预热 ⇒ config.warm.enabled = false', GFI.config.warm.enabled === false);
+    check('抢跑预算/淡入时长能改', GFI.config.warm.syncSettleMs === 456 && GFI.config.warm.revealAnimMs === 0,
+      `${GFI.config.warm.syncSettleMs} / ${GFI.config.warm.revealAnimMs}`);
+
+    // ⚠ 回归：prewarm 默认是 true，老存档里没有这个键时【不能】被 !!undefined 关掉
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION });
+    check('老存档没有 prewarm 键 ⇒ 保持默认开着（不被 !!undefined 关掉）',
+      GFI.config.warm.enabled === d.warm.enabled, `enabled=${GFI.config.warm.enabled} 期望 ${d.warm.enabled}`);
+    check('超出区间的抢跑预算 ⇒ 回落默认值',
+      (() => { GFI.syncSettings({ __cfg: GFI.CFG_VERSION, syncSettleMs: 999999 }); return GFI.config.warm.syncSettleMs === d.warm.syncSettleMs; })(),
+      `${GFI.config.warm.syncSettleMs}`);
+  } finally {
+    GFI.syncSettings({ __cfg: GFI.CFG_VERSION });
+    i18n.set(keepLang);
+    Object.assign(GFI.config.warm, JSON.parse(keepWarm));
+  }
+})();
+
+// ===========================================================================
+// 21. 面板文案就地改写 —— 带行内格式的描述也必须能切换
+// ===========================================================================
+// 回归一个实机问题：用户报「某些简介不切换」。
+// 根因是 relabelPanel 原先只改【叶子】元素（内部没有元素子节点），
+// 而 Logseq 会把描述里的 **粗体** / `代码` 渲染成 <strong> / <code> ——
+// 那条描述所在的元素就带上了元素子节点，于是被整条跳过。
+// 这里用假 DOM 复刻两种节点：纯文本的 + 带行内 <strong> 的，两者都必须被改写。
+(function testRelabelPanel() {
+  const i18n = GFI.i18n;
+
+  // 迷你假 DOM（只需要 relabelPanel 用到的那几个成员）
+  // ⚠ textContent 必须实现【写】—— relabelPanel 靠"整体替换内容"来改写，
+  //   只实现读的话这个夹具根本测不出真实行为。写的行为照浏览器来：
+  //   清掉全部子节点，换成一个文本节点。
+  function mkFake(leaf) {
+    const parent = { className: 'settings-panel', id: '', childNodes: [], parentElement: null };
+    const el = {
+      className: 'settings-item-desc', id: '', __gfiSkip: false,
+      childNodes: leaf ? [{ nodeType: 3, nodeValue: '' }] : [],
+      parentElement: parent,
+      get textContent() {
+        return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : (c.textContent || ''))).join('');
+      },
+      set textContent(v) {
+        this.childNodes.length = 0;
+        this.childNodes.push({ nodeType: 3, nodeValue: String(v) });
+      },
+    };
+    return el;
+  }
+
+  // 造三个节点：
+  //   plain   —— 纯文本（基线）
+  //   rich    —— 文本 + 行内元素（模拟 "描述里有 <strong>"）
+  //   onlyEl  —— 内部【只有】元素子节点、没有裸文本（最刁的那种）
+  // ⚠ 每个节点必须有【自己的】行内元素对象 —— 共用会让断言互相污染（写错过一次）
+  const mkSpan = () => ({ nodeType: 1, nodeValue: undefined, textContent: '' });
+
+  const plain = mkFake(true);
+
+  const richSpan = mkSpan();
+  const rich = mkFake(false);
+  rich.childNodes = [{ nodeType: 3, nodeValue: '' }, richSpan];
+
+  const onlyElSpan = mkSpan();
+  const onlyEl = mkFake(false);
+  onlyEl.childNodes = [onlyElSpan];
+
+  const nodes = [plain, rich, onlyEl];
+
+  const doc = {
+    querySelectorAll: () => nodes,
+    getElementById: () => null,
+  };
+  const keepDoc = GFI.topDoc;
+  GFI.topDoc = doc;
+  try {
+    // 拿一条真实文案当靶子
+    // ⚠ 期望值必须用 i18n.t() 现取，【不能】用 i18n.schema() ——
+    //   schema() 是插件启动时按当时的语言编译好的快照，这里早就变成中文了，
+    //   拿它当英文期望值会得到假失败（自己踩过）。
+    const entry = i18n.SCHEMA.find((e) => e.key === 'popZeta');
+    const zhText = i18n.t(entry.short, 'zh');
+    const enText = i18n.t(entry.short, 'en');
+
+    plain.childNodes[0].nodeValue = zhText;
+    rich.childNodes[0].nodeValue = zhText;
+    richSpan.textContent = '';
+    onlyElSpan.textContent = zhText;
+    // 模拟它已经是"目标语言"（改写前应当是中文）
+    i18n.set('en');
+    const hits = i18n.relabelPanel();
+
+    check('纯文本节点被改写（基线）', plain.textContent === enText, JSON.stringify(plain.textContent.slice(0, 40)));
+    check('⚠ 带行内元素的描述【也】被改写（旧的"只改叶子"逻辑会漏掉它）',
+      rich.textContent === enText, JSON.stringify(String(rich.textContent).slice(0, 40)));
+    check('⚠ 内部只有元素子节点的描述也能改写（整体替换，不留旧文案）',
+      onlyEl.textContent === enText, JSON.stringify(String(onlyEl.textContent).slice(0, 60)));
+    check('一次改写命中三个节点', hits === 3, `hits=${hits}`);
+    check('已经是目标语言时不重复改写（幂等）', i18n.relabelPanel() === 0, `第二次 hits=${i18n.relabelPanel()}`);
+
+    // debug 模式要能报出"看起来像我们的文案但没匹配上"的内容
+    plain.childNodes[0].nodeValue = '这是一条我们完全不认识的很长的描述文本，用来触发 debug 收集';
+    const dbg = i18n.relabelPanel({ debug: true });
+    check('debug 模式返回结构化的扫描结果',
+      dbg && typeof dbg.scanned === 'number' && Array.isArray(dbg.missed),
+      JSON.stringify({ hits: dbg && dbg.hits, scanned: dbg && dbg.scanned, missedN: dbg && dbg.missed.length }));
+
+    // ---- ⚠ 绝不能碰含交互控件的元素（实机事故：点完语言"可选框没了"）----
+    // 复刻 Logseq 的 enum：容器里是 <input type=radio> + <label>，
+    // 而容器的整段文本恰好等于我们某条 enum 的候选文案 ——
+    // 整体替换会把单选框一起抹掉。
+    const radio = { tagName: 'INPUT', nodeType: 1, textContent: '' };
+    const enumContainer = {
+      className: 'settings-enum-item', id: '', __gfiSkip: false,
+      tagName: 'DIV', parentElement: { className: 'settings-panel', id: '', parentElement: null },
+      childNodes: [{ nodeType: 3, nodeValue: i18n.t(entry.short, 'zh') }, radio],
+      get textContent() { return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join(''); },
+      set textContent(v) { this.childNodes.length = 0; this.childNodes.push({ nodeType: 3, nodeValue: String(v) }); },
+      querySelector: (sel) => (/input/i.test(sel) ? radio : null),
+    };
+    const keepDoc2 = GFI.topDoc;
+    GFI.topDoc = { querySelectorAll: () => [enumContainer], getElementById: () => null };
+    try {
+      i18n.set('zh');
+      const before = enumContainer.childNodes.length;
+      const n2 = i18n.relabelPanel();
+      check('⚠ 含单选控件的容器不被改写（否则"可选框没了"）',
+        enumContainer.childNodes.length === before && enumContainer.childNodes.indexOf(radio) >= 0,
+        `改写 ${n2} 条，子节点数 ${before} → ${enumContainer.childNodes.length}`);
+      check('控件被跳过时会计入 skippedControls（可观测）',
+        (GFI.__relabelStat && GFI.__relabelStat.skippedControls) === 1,
+        JSON.stringify(GFI.__relabelStat));
+      check('hasInteractive 能识别 input 容器', i18n.hasInteractive(enumContainer) === true);
+      check('hasInteractive 对纯文本节点返回 false', i18n.hasInteractive(plain) === false);
+    } finally {
+      GFI.topDoc = keepDoc2;
+    }
+  } finally {
+    GFI.topDoc = keepDoc;
+    i18n.set('zh');
+  }
 })();
 
 // ===========================================================================

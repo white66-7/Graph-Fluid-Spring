@@ -8,7 +8,12 @@
   const STYLE_ID = 'gfi-overlay-styles';
 
   const CSS = `
-.gfi-root { position:absolute; inset:0; z-index:1; }
+/* ⚠ overflow:hidden 不是装饰：这个容器是 position:absolute + inset:0，
+   尺寸完全跟随 #global-graph。如果 root 的定位上下文不是我们以为的那个
+   （比如它是 static，我们的 absolute 就会挂到更高的祖先上），容器会撑成
+   整屏大小、盖住设置面板之类的 UI，把滚轮/点击一起吃掉。
+   加上 overflow:hidden 之后，它至少不会把自己的内容画到 root 之外。 */
+.gfi-root { position:absolute; inset:0; overflow:hidden; z-index:1; }
 .gfi-canvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; }
 
 .gfi-toolbar {
@@ -72,6 +77,26 @@
   transition: transform .12s ease;
 }
 .gfi-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+/* 加载指示 —— 只在我们已经接管、但画布上还没有内容的那个窗口里出现。
+   它替代的是"原生图谱继续显示"那段：既然要的是"点进去就是我的样式"，
+   那等待期间就不该再让原生图谱露脸，但也不能是一片空白。 */
+.gfi-loader {
+  position:absolute; inset:0; z-index:5;
+  display:flex; align-items:center; justify-content:center; gap:10px;
+  font:12px/1 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ls-secondary-text-color, rgba(255,255,255,0.45));
+  letter-spacing:.4px;
+  pointer-events:none;
+}
+.gfi-loader[hidden] { display:none; }
+.gfi-spinner {
+  width:15px; height:15px; border-radius:50%;
+  border:1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: gfi-spin .7s linear infinite;
+}
+@keyframes gfi-spin { to { transform: rotate(360deg); } }
 `;
 
   function injectStyles() {
@@ -117,6 +142,7 @@
       // 靠 prev 拿到别人的__PIXI_APP_INIT__函数
       const prev = w.__PIXI_APP_INIT__;
       captureHook = function (app, version) {
+        record('原生 Pixi 起画（原生图谱此刻已经能看）');
         try { if (app && app.canvas) capturedApps.push(app); } catch (e) {}
         if (takeoverRoot) {
         // 如果发现我们正在接管，就预约一个暂停操作，但稍后再做
@@ -184,10 +210,16 @@
   // 参数与返回注释
   /**
    * @param {HTMLElement} root #global-graph
+   * @param {object} [opts] { nativeVisible:boolean }
+   *        nativeVisible 默认 false —— 挂载即接管（把原生画布藏掉、露出我们的
+   *        加载指示）。这是"点进去就是我的样式"的前提：只要还让原生图谱显示，
+   *        用户必然先看到它，再看到我们。
    * @returns {object|null}
    */
-  function mount(root) {
+  function mount(root, opts) {
     if (!root) return null;
+    opts = opts || {};
+    const showNative = !!opts.nativeVisible;
 
     // 挂载过、还活着、还在DOM里就返回
     if (root.__gfiMounted && root.__gfiContainer && root.__gfiContainer.isConnected) return null;
@@ -208,6 +240,12 @@
       rootPosition: root.style.position,
     };
     
+    // ⚠ 只在 root 是 static 时才改成 relative —— 这是为了给我们的 absolute
+    //   容器建立定位上下文。如果 root 本来就有定位（Logseq 通常给了 absolute
+    //   或 relative），就【不要碰它】。
+    //   实机排查"设置面板滚不动/点不动"时，第一件要确认的事就是
+    //   `.gfi-root` 的 rect 是否等于 #global-graph 的 rect；不相等就说明
+    //   定位上下文不是这里，容器撑成了整屏。
     if (GFI.topWin.getComputedStyle(root).position === 'static') {
       root.style.position = 'relative';
     }
@@ -215,10 +253,26 @@
     // ---- 容器 ----
     const container = doc.createElement('div');
     container.className = 'gfi-root';
+    // 给 i18n 的面板文案改写打标记：它靠"文字内容反查"定位设置面板的节点，
+    // 万一图谱里恰好有 {label} 的文字、又落在疑似 settings 的子树里，
+    // 就会被误改。这个标记让它整棵跳过我们的容器。
+    container.__gfiSkip = true;
 
     const canvas = doc.createElement('canvas');
     canvas.className = 'gfi-canvas';
     container.appendChild(canvas);
+
+    // 加载指示。默认隐藏 —— 只有 main.js 明确说"还没内容"时才亮。
+    const loader = doc.createElement('div');
+    loader.className = 'gfi-loader';
+    loader.hidden = true;
+    const spinner = doc.createElement('div');
+    spinner.className = 'gfi-spinner';
+    const loaderText = doc.createElement('div');
+    loaderText.textContent = '图谱布局中…';
+    loader.appendChild(spinner);
+    loader.appendChild(loaderText);
+    container.appendChild(loader);
 
     const toolbar = doc.createElement('div');
     toolbar.className = 'gfi-toolbar';
@@ -228,7 +282,7 @@
     root.__gfiContainer = container;
 
     let resizeCb = null;  // 用来存储外部函数的变量
-    let pendingResize = false;  
+    let resizeRaf = null; // 已排队的 resize 合并（0 = 没有）
     let observer = null;
 
     function measure() {
@@ -239,12 +293,20 @@
     const RO = GFI.topWin.ResizeObserver || window.ResizeObserver;
     if (RO) {
       observer = new RO(() => {
-        if (pendingResize) return;
-        pendingResize = true;
         // 合并到 rAF，避免连续触发时重复 resize
-        GFI.topWin.requestAnimationFrame(() => {
-          pendingResize = false;
-          if (resizeCb) { const m = measure(); resizeCb(m.w, m.h); }
+        if (resizeRaf != null) return;
+        resizeRaf = GFI.topWin.requestAnimationFrame(() => {
+          resizeRaf = null;
+          if (!resizeCb) return;
+          const m = measure();
+          // ⚠ 量到 0 就直接丢掉。容器在原生模式（或还没显示）时是 display:none，
+          //   量出来是 0×0 —— 拿它去 resize 会把相机与画布一起打成 0，
+          //   回到我们的视图时就是一片空白，而且 ResizeObserver 不会再触发一次
+          //   （尺寸"没变"）。原来是靠一个 pendingResize 标志位卡住，
+          //   但那个标志位在 rAF 回调抛错时会永久停在 true，ResizeObserver
+          //   从此彻底失效 —— 用一个"排队 id"就不会有这种粘滞状态。
+          if (m.w <= 1 || m.h <= 1) return;
+          resizeCb(m.w, m.h);
         });
       });
       try { observer.observe(root); } catch (e) {}
@@ -265,6 +327,11 @@
 
       readBackground,
 
+      /** 画布上还没有内容时亮着它 —— 见 CSS 里 .gfi-loader 的说明 */
+      showLoader() { loader.hidden = false; },
+      hideLoader() { loader.hidden = true; },
+      get loaderVisible() { return !loader.hidden; },
+
       // 接管或回归原生图谱，这取决于 nativeVisible
       setNativeVisible(nativeVisible) {
         if (nativeCanvas) {
@@ -279,6 +346,11 @@
         takeoverRoot = nativeVisible ? null : root;
         if (nativeVisible) resumeNativeRenderers();
         else pauseNativeRenderers();
+        // ---- 时序探针 ----
+        // 观感问题（"先看到原生图谱"）无法靠读代码定论 —— 它取决于宿主什么时候
+        // 把 #global-graph 交出来。所以每一次切换都留一条带时间戳的记录，
+        // 事后在控制台调 __GFI__.timeline() 就能看到客观顺序。
+        record(nativeVisible ? '切回原生图谱' : '隐藏原生图谱（我们接管）');
       },
 
       // 被暂停的原生渲染器数量
@@ -292,6 +364,8 @@
         takeoverRoot = null;
         try { if (observer) observer.disconnect(); } catch (e) {}
         observer = null;
+        if (resizeRaf != null) { try { GFI.topWin.cancelAnimationFrame(resizeRaf); } catch (e) {} resizeRaf = null; }
+        resizeCb = null;
         try { root.style.position = nativeState.rootPosition; } catch (e) {}
         // 还原原生元素
         if (nativeCanvas) {
@@ -316,11 +390,70 @@
     return api;
   }
 
-   // 注册 __PIXI_APP_INIT__ 函数
+   // ---------------------------------------------------------------------------
+  // 时序探针 —— 进图谱那几百毫秒里到底发生了什么，靠它定论
+  // ---------------------------------------------------------------------------
+  // 为什么必须有：观感（"先看到原生图谱"）是【宿主 + 我们】的时序产物。
+  // 读代码只能证明我们会怎么切，证明不了宿主什么时候把 #global-graph 交出来、
+  // 原生 Pixi 是什么时候起画的。所以把每个分界点记成一条带时间戳的记录，
+  // 事后 `__GFI__.timeline()` 就能给出客观顺序，而不是靠感觉描述。
+  const MAX_EVENTS = 80;
+  const origin = (() => { try { return GFI.topWin.performance.now(); } catch (e) { return 0; } })();
+  let events = [];
+
+  function record(label, detail) {
+    let t = 0;
+    try { t = GFI.topWin.performance.now() - origin; } catch (e) {}
+    events.push({ t: Math.round(t), label, detail: detail === undefined ? '' : detail });
+    if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+  }
+
+  /** 打印时序。返回数组，方便脚本化断言。 */
+  function printEvents() {
+    const lines = events.map((e) => `${String(e.t).padStart(6)}ms  ${e.label}${e.detail !== '' ? '  ' + e.detail : ''}`);
+    console.log('%c[GFI] 进图谱时序\n' + lines.join('\n'), 'color:#0aa;font-family:monospace');
+    return events.slice();
+  }
+
+  function clearEvents() { events = []; }
+
+  // ---- 原生图谱是什么时候出现在 DOM 里的 ----
+  // 探针脚本可能比这个模块晚加载，所以先同步查一次。
+  // ⚠ 这两行必须排在 events 声明【之后】：record 会往 events 里写，
+  //   提前调用就是一次 TDZ 抛错（`Cannot access 'events' before initialization`），
+  //   而且它会连带把 __PIXI_APP_INIT__ 的注册一起带走。
+  const initialRoot = findRoot();
+  record('overlay.js 加载', initialRoot ? '#global-graph 已在 DOM' : '#global-graph 还不在');
+
+  // 暴露给后加载的探针脚本：它拿到的 events 是同一个数组引用（实时）。
+  const w = GFI.topWin;
+  if (w) { w.__GFI_TIMELINE__ = { events, print: printEvents, clear: clearEvents }; }
+
+  function startRootWatch() {
+    const doc = GFI.topDoc;
+    if (!doc || !doc.body || !GFI.topWin.MutationObserver) return;
+    let seen = !!initialRoot;
+    try {
+      const mo = new GFI.topWin.MutationObserver(() => {
+        const r = findRoot();
+        const now = !!r;
+        if (now === seen) return;
+        seen = now;
+        record(now ? '宿主挂上图谱 DOM' : '宿主移除图谱 DOM');
+      });
+      mo.observe(doc.body, { childList: true, subtree: true });
+    } catch (e) {}
+  }
+
+  // 原生 Pixi Application 是什么时候被创建出来的 —— 这一条决定"原生图谱
+  // 到底有没有机会被看到"（它一旦 start()，画布上就有内容了）。
+  // ---- 注册 __PIXI_APP_INIT__ 函数
   installPixiCapture();
+  startRootWatch();
 
   GFI.Overlay = {
     mount, findRoot, injectStyles, readBackground, STYLE_ID,
     releasePixiCapture, pauseNativeRenderers, resumeNativeRenderers,
+    record, printEvents, clearEvents, startRootWatch,
   };
 })(window.GFI);

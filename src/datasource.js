@@ -78,6 +78,17 @@
   // =========================================================================
   // 真实数据源
   // =========================================================================
+  // 查询失败的计数与"只喊第一条"的闸门。
+  //
+  // ⚠ 为什么需要：冷启动时 Logseq 的 DB worker 还没起来，fromLogseq() 会连着
+  //   发 11 条查询、**全部失败**（\`db-worker has not been initialized\`）——
+  //   实机日志里就是 11 行一模一样的 warn，把真正有用的那几行淹掉。
+  //   现在第一条仍然照原样喊出来（它就是最有诊断价值的那条），后面的静默，
+  //   最后由 fromLogseq() 补一条摘要说明"共几条失败、第一条的错因是什么"。
+  //   信息一点没丢，噪音从 11 行降到 2 行。
+  let queryFailCount = 0;
+  let queryFirstError = null;
+
   async function query(q) {
     const L = LS();
     if (!L || !L.DB || !L.DB.datascriptQuery) return null;
@@ -86,7 +97,12 @@
       const r = await L.DB.datascriptQuery(q);
       return Array.isArray(r) ? r : null;
     } catch (e) {
-      console.warn('[GFI] datascriptQuery 失败:', q.slice(0, 60), e && e.message);
+      const msg = (e && e.message) || String(e);
+      queryFailCount++;
+      if (queryFailCount === 1) {
+        queryFirstError = msg;
+        console.warn('[GFI] datascriptQuery 失败:', q.slice(0, 60), msg);
+      }
       return null;
     }
   }
@@ -108,6 +124,9 @@
     opts = opts || {};
     const L = LS();
     if (!L) throw new Error('[GFI] logseq API 不可用');
+    // 本次取数的查询失败计数从零开始（见 query() 的说明）
+    queryFailCount = 0;
+    queryFirstError = null;
 
     // ---------------- 需要排除的实体 ----------------
     // 内部实体（模板、属性定义等）不隐藏掉的话会把真实结构淹掉
@@ -255,6 +274,18 @@
       filterStats.push(`名字黑名单剔除 ${removed} 个零度节点` + (removed ? ` [${hit.join(', ')}]` : ''));
     }
 
+    // DB 还没就绪时，上面那十几条查询会全军覆没、节点数为 0。那种情况下
+    // "0 节点"是【可重试】的瞬时状态，不是"这个图谱真的是空的" —— 但这一层
+    // 分不出来，所以它只负责把事实说清楚；重试由 index.js 的预热退避去做
+    // （退避跑完仍为空就停手，不会对着一个真·空图谱无限查库）。
+    if (queryFailCount > 0 && nodes.length === 0) {
+      console.warn(`[GFI] 取数全部失败（${queryFailCount} 条查询）—— DB 可能还没就绪`
+        + `；首条错因：${queryFirstError}`);
+    } else if (queryFailCount > 0) {
+      console.warn(`[GFI] 有 ${queryFailCount} 条查询失败，但取到了 ${nodes.length} 个节点（部分过滤条件未生效）`
+        + `；首条错因：${queryFirstError}`);
+    }
+
     const withTs = nodes.reduce((c, n) => c + (n.createdAt ? 1 : 0), 0);
     console.log(
       `[GFI] 数据源：${nodes.length} 节点 / ${links.length} 边  ` +
@@ -347,18 +378,52 @@
   // =========================================================================
   // 统一入口
   // =========================================================================
+  //
+  // 并发去重：相同请求在飞行中时复用同一个 Promise。
+  //
+  // ⚠ 为什么需要（实机日志暴露）：预热与"打开图谱"会几乎同时各查一次库 ——
+  //     预热启动（就绪后）→ 查库 438ms
+  //     图谱打开            → 又查一次 314ms        ← 同一份 68 节点，查了两遍
+  //   两次的结果完全一样，但每次都打一遍"数据源：68 节点 / 89 边"与过滤明细，
+  //   白白多花几百毫秒与一份内存。
+  //
+  //   这里刻意**不做结果缓存**（只做同飞行去重）：图谱在"刚编辑过"的时候重开，
+  //   本来就该拿到新数据，长期缓存会画出过期的图。飞行中的那次合并是安全的 ——
+  //   两个调用方要的是同一时刻的同一份数据。
+  //
+  // ⚠ 失败也要清掉记录，否则一次查询失败会让后续所有请求都复用那个失败的 Promise。
+  let inflight = null;
+  let inflightKey = '';
+
   /**
    * @param {object} o { source: 'logseq'|'demo', demoCount, includeParentLinks }
    */
-  async function fetchData(o) {
+  function fetchData(o) {
     o = o || {};
-    if (o.source === 'demo' || !LS()) return demo(o.demoCount || 400, o);
-    try {
-      return await fromLogseq(o);
-    } catch (e) {
-      console.error('[GFI] 拉取真实数据失败，退回 demo：', e);
-      return demo(o.demoCount || 400, o);
+    if (o.source === 'demo' || !LS()) return Promise.resolve(demo(o.demoCount || 400, o));
+
+    const key = String(o.source || 'logseq') + '|' + (o.demoCount || 400) + '|' + (o.includeParentLinks ? 1 : 0);
+    if (inflight && inflightKey === key) {
+      console.log('[GFI] 数据请求合并（同一份请求正在飞行中）');
+      return inflight;
     }
+
+    const p = (async function run() {
+      try {
+        return await fromLogseq(o);
+      } catch (e) {
+        console.error('[GFI] 拉取真实数据失败，退回 demo：', e);
+        return demo(o.demoCount || 400, o);
+      }
+    })();
+
+    inflight = p;
+    inflightKey = key;
+    p.then(
+      () => { if (inflight === p) { inflight = null; inflightKey = ''; } },
+      () => { if (inflight === p) { inflight = null; inflightKey = ''; } }
+    );
+    return p;
   }
 
   GFI.DataSource = { fetchData, fromLogseq, demo, query };
