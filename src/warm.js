@@ -203,7 +203,7 @@
 
       if (myGen !== generation) return null;
 
-      const entry = buildEntry(key, data, D, sim, ticks, blocked);
+      const entry = buildEntry(key, D, sim, ticks, blocked);
       // ⚠ 接着半成品跑时要把"同步抢跑已经烧掉的那段时间"加回来（priorMs），
       //   否则 costMs 只反映本轮，会把"整张图沉降到底花了多久"报小。
       entry.costMs = Math.round(priorMs + (GFI.util.now() - t0));
@@ -233,12 +233,19 @@
   /**
    * 把跑完的 D / sim 打包成缓存条目。
    *
+   * ⚠⚠ 条目里【刻意不放原始数据】（没有 `data` 字段）。
+   *   它原先带着 `data: { nodes, links }` —— 那是"预热那一刻"的查库快照；
+   *   调用方很容易顺手把它当数据用。实机就这么踩了：用户删页面、改正文之后
+   *   图谱永远停在旧数据上，因为每次打开喂进去的都是同一份快照。
+   *   现在结构上就没有东西可误用：缓存只回答"每个 id 落在哪里"，
+   *   数据一律由调用方现查。
+   *
    * ⚠ 只取【可见】节点的坐标。不可见的节点（时间轴 cutoff 之外的）首次进入时
    *   本来就该走"出生"那条路径，给它们一个沉降后的坐标没有意义。
    *   当前 build 把所有节点初始化为可见、cutoff 初值 = range.max，所以实际上
    *   会全取；留着这个判断是为了将来 cutoff 初值改了不会静默出错。
    */
-  function buildEntry(key, data, D, sim, ticks, blocked) {
+  function buildEntry(key, D, sim, ticks, blocked) {
     const layout = new Map();
     for (let i = 0; i < D.n; i++) {
       if (!D.visible[i]) continue;
@@ -247,8 +254,7 @@
     const bb = GFI.Data.bounds(D, false);
     return {
       key,
-      data,                                   // 原始 nodes/links，交给 setData 用
-      layout,
+      layout,                                 // ← 唯一的产出，就它
       n: D.n,
       m: D.m,
       ticks,
@@ -334,7 +340,7 @@
       return null;
     }
 
-    const entry = buildEntry(key, { nodes, links }, D, sim, ticks, false);
+    const entry = buildEntry(key, D, sim, ticks, false);
     entry.syncTicks = ticks;
     entry.costMs = spent;
     cache = entry;

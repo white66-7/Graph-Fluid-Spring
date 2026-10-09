@@ -342,22 +342,30 @@
   }
 
   /**
-   * 把一份布局弄到手并交给图谱。三级，从便宜到贵：
+   * 把一份【布局】弄到手。三级，从便宜到贵：
    *
    *   ① 后台预热缓存      —— 命中就零成本（第二次进图谱走这里）
    *   ② 同步抢跑 settleNow —— 有数据、但预热没跑完：在 loader 后面阻塞一小段
    *                          把它跑完（中小库 0.5 秒内），还是零成本呈现
    *   ③ 异步等预热         —— 抢跑超预算（大库）时，只能分帧等它跑完
    *
-   * 三条路的终点是同一个：**第一帧画的就是最终布局**，因此不需要那第二次
-   * 「适配视野」。任何一条都不成立时返回 null，调用方按即时沉降走。
+   * ⚠⚠ **这里只给布局，绝不给数据。** 这是踩过大坑之后立的规矩：
+   *   缓存的 `entry.data` 是"预热那一刻"的查库快照。曾经在缓存命中时直接把它
+   *   当数据用 —— 结果用户删了页面、改了正文，**图谱永远停在旧数据上再也不更新**，
+   *   因为每次打开图谱喂进去的都是同一份快照。
+   *   现在：数据一律现查（`beginFetch()`，调用方已经在 boot 之前按下去了），
+   *   缓存只提供"每个 id 落在哪里"。
+   *   布局缓存本身是按 id 映射的，所以对数据变化是【天然安全】的：
+   *     · 删掉的节点：新数据里没有它，自然消失
+   *     · 新增的节点：命中不了 → 走"部分命中 = 即时沉降"那条老路径
+   *     · 改名的节点：id 不变，位置不变（正是想要的）
    *
    * ⚠ 顺序不能调：必须先试缓存（免费），再试抢跑（便宜），最后才异步等（贵）。
    *   之前只写了 ①③，于是"预热没跑完"的首开必然落到 ③ 甚至 null ——
    *   那正是用户看到的「布局中 → 呈现 → 再适配视角」。
    *
    * @param {Promise} [fetching] beginFetch() 的结果（调用方已经先按下去了）
-   * @returns {Promise<{entry:object|null, playReveal:boolean}>}
+   * @returns {Promise<{layout:Map|null, playReveal:boolean}>}
    *          playReveal = 布局是【这次现场跑出来的】（首次打开）→ 值得一次淡入；
    *          缓存命中（重新打开）时为 false —— 画面该一模一样地立刻出现。
    */
@@ -365,31 +373,35 @@
     const key = prewarmKey();
     const req = prewarmRequest();
 
+    // ① 缓存命中：只要它的 layout；数据照样现查
     const cached = GFI.Warm.peek(key);
-    if (cached) { GFI.Overlay.record('布局来源', '预热缓存命中'); return { entry: cached, playReveal: false }; }
+    if (cached) {
+      GFI.Overlay.record('布局来源', '预热缓存命中（数据仍现查）');
+      return { layout: cached.layout, playReveal: false };
+    }
 
     if (!GFI.Warm.pending(key)) {
-      // 没有正在跑的预热 —— 用调用方提前按下的那次查库，然后在 loader 后面同步抢跑。
+      // ② 没有正在跑的预热 —— 用调用方提前按下的那次查库，然后在 loader 后面同步抢跑。
       const t0 = performance.now();
       const data = await (fetching || beginFetch());
-      if (!data || !data.nodes.length) return { entry: null, playReveal: false };
+      if (!data || !data.nodes.length) return { layout: null, playReveal: false };
       const waited = performance.now() - t0;   // 已经等掉的时间（并行段不算）
 
       const sync = GFI.Warm.settleNow(data.nodes, data.links, req);
       if (sync) {
         GFI.Overlay.record('布局来源',
           `同步抢跑 ${sync.costMs}ms（查库等待 ${Math.round(waited)}ms）`);
-        return { entry: sync, playReveal: true };
+        return { layout: sync.layout, playReveal: true };
       }
       GFI.Overlay.record('布局来源', '抢跑超预算，回退即时沉降');
-      return { entry: null, playReveal: true };
+      return { layout: null, playReveal: true };
     }
 
-    // 预热正在跑：等它。等回来的就是一条沉降好的布局。
+    // ③ 预热正在跑：等它的布局。数据同样现查（与它并行）。
     console.log('[GFI] 预热正在跑，等它跑完再装载（loader 亮着）');
     GFI.Overlay.record('布局来源', '等待后台预热完成');
     const entry = await GFI.Warm.pending(key);
-    return { entry: entry || null, playReveal: true };
+    return { layout: entry ? entry.layout : null, playReveal: true };
   }
 
   async function mountGraph() {
@@ -399,7 +411,8 @@
       // ---- ① 先把查库挂起来（不 await），再去挂载 ----
       // ⚠ 这一行的位置就是这个函数的全部要点：放在 boot() 之后的话，
       //   查库那 400~500ms 里原生图谱是露着的（实机时序见 beginFetch 的注释）。
-      const fetching = beginFetch();
+      //   另外这也是"数据永远新鲜"的保证 —— 见 acquireLayout 的注释。
+      let fetching = beginFetch();
 
       // ---- ② 立刻挂载：原生图谱在 mount 那一刻就被藏掉 ----
       // ⚠ 绝不能"先 await 预热/查库、再 boot" —— 那样在数据到齐之前我们根本
@@ -411,11 +424,11 @@
       });
       if (!graphApi) { booting = false; return; }
 
-      let warm = null;
+      let layout = null;
       let playReveal = false;
       try {
         const got = await acquireLayout(fetching);
-        warm = got.entry;
+        layout = got.layout;
         playReveal = got.playReveal;
       } catch (e) {
         console.error('[GFI] 取布局失败，按即时沉降走', e);
@@ -427,28 +440,39 @@
         return;
       }
 
-      if (warm && warm.data && warm.data.nodes.length) {
-        lastRaw = { nodes: warm.data.nodes, links: warm.data.links };
-        // reveal 只在【布局是这次现场跑出来的】时给：
-        //   · 同步抢跑 / 等后台预热 = 用户第一次打开 → 从空白淡入 0.3 秒
-        //   · 预热缓存命中          = 用户重新打开 → 一模一样地立刻出现
-        graphApi.setData(warm.data.nodes, warm.data.links, {
-          layout: warm.layout,
-          reveal: playReveal,
-        });
-        return;
+      // ---- ③ 数据：一律现查 ----
+      // ⚠ 绝不能退回"用缓存里的数据"。那正是"删了页面图谱也不更新"的原因。
+      //   缓存条目里现在【没有 data 字段】了 —— 这是刻意的结构约束：
+      //   想误用也没有东西可误用（见 acquireLayout 的注释）。
+      let data = lastRaw || (await fetching);
+      if (!lastRaw) {
+        // 走到这里说明 acquireLayout 是走"缓存命中"或"等预热"回来的（都没查库），
+        // 而本次 beginFetch 又抛了/返回空。补一次同样的查询尝试把数据弄到手。
+        if (!data || !data.nodes.length) {
+          try { data = await beginFetch(); } catch (e) { data = null; }
+        }
       }
-
-      // ---- 兜底：即时沉降 ----
-      // 只有"抢跑超预算"或"预热被作废"才走到这里。数据直接用 ① 里已经按下的
-      // 那次查库（它的结果在 acquireLayout 里已经写进 lastRaw 了）。
-      const data = lastRaw || (await fetching);
+      fetching = null;
       if (!graphApi || !graphApi.alive) { booting = false; return; }   // 期间被拆掉了
       if (!data || !data.nodes.length) {
         console.warn('[GFI] 数据为空 —— 图谱会停在加载态（loader 亮着）');
         return;
       }
       lastRaw = data;
+
+      // ---- ④ 有布局就灌布局，没有就即时沉降 ----
+      if (layout) {
+        // reveal 只在【布局是这次现场跑出来的】时给：
+        //   · 同步抢跑 / 等后台预热 = 用户第一次打开 → 从空白淡入 0.3 秒
+        //   · 预热缓存命中          = 用户重新打开 → 一模一样地立刻出现
+        const res = graphApi.setData(data.nodes, data.links, { layout, reveal: playReveal });
+        // 部分命中（库变了）时 main.js 会自己回退即时沉降，这里只记一笔
+        if (res && !res.warm) {
+          console.log(`[GFI] 布局只命中 ${res.adopted}/${res.n} —— 库已变化，本次按即时沉降走`);
+        }
+        return;
+      }
+
       // 补一份预热：这次没吃到，下次进图谱就有了。
       // 注意这里【不 await】——本轮装载不等它，避免两条路互相等成死锁。
       startPrewarm('本次未命中，后台补一份');
@@ -491,7 +515,38 @@
     return lastRaw;
   };
 
+  // ---------------------------------------------------------------------------
+  // 库变动 → 图谱自己刷新
+  // ---------------------------------------------------------------------------
+  // 为什么需要（实机反馈）：「删掉某些页面、改了部分正文，图谱自加载后就不再更新」。
+  //   一半原因是我引入的 bug（缓存里的数据被当数据用，已修：现在数据一律现查），
+  //   另一半是**原来根本没有刷新机制** —— 图谱只在"打开"那一刻查一次库，
+  //   之后无论库怎么变都不会再看第二眼。
+  //
+  // 过滤与防抖的逻辑都在 `src/livewatch.js`（单独成模块是为了能测 ——
+  // `looksLikeContentEdit` 的两条纪律：不能自激、不能太贵）。
+  // 这里只负责接线：
+  //   · isMounted：图谱没挂着就不用刷（下次打开一定会现查）
+  //   · refresh  ：走 `GFI.reloadData()`，与 `__GFI__.reload()` 同一条路
+  //
+  // ⚠ 为什么【不用】 `logseq.DB.onBlockChanged`：读了 SDK 源码，它是
+  //     `onBlockChanged(e, t){ ... s = ({block:r,...}) => { r.uuid === e && t(...) } }`
+  //   —— 参数是【某个块的 uuid】，只回调那一个块的变化。拿它做"任何变动"的全局
+  //   监听是错的：随便传个不存在的 uuid 就永远不触发。所以不假装能用。
+  //
+  // ⚠ 成本要说清楚：每次刷新就是一次完整查库（实测 300~500ms，68 节点的库）。
+  //   所以防抖 1500ms —— 停手之后才查。
+  const graphRefresh = GFI.LiveWatch.createScheduler({
+    debounceMs: 1500,
+    isMounted: () => !!(graphApi && graphApi.alive),
+    refresh: (reason) => {
+      console.log(`[GFI] 检测到内容变动（${reason || ''}）—— 自动刷新图谱数据`);
+      return GFI.reloadData();
+    },
+  });
+
   function unmountGraph() {
+    graphRefresh.cancel();       // 图谱都关了，排队中的刷新没有意义
     if (graphApi) {
       graphApi.destroy('graph view closed');
       graphApi = null;
@@ -567,13 +622,23 @@
 
   function startObserver() {
     scan();
-    observer = new GFI.topWin.MutationObserver(scheduleScan);
-    observer.observe(GFI.topDoc.body, { childList: true, subtree: true });
+    // ⚠ 回调里同时做两件事：
+    //   ① 合并到 scheduleScan（图谱视图的出现/消失 → 挂载/拆卸）
+    //   ② 把变动交给 graphRefresh（过滤 + 防抖都在 src/livewatch.js 里）
+    // 观察参数必须带 characterData —— 否则"改正文"这类纯文本修改根本不产生回调。
+    observer = new GFI.topWin.MutationObserver((muts) => {
+      scheduleScan();
+      try {
+        graphRefresh.notify(muts, 'DOM 内容变动');
+      } catch (e) { /* 过滤失败不能影响扫描 */ }
+    });
+    observer.observe(GFI.topDoc.body, { childList: true, subtree: true, characterData: true });
   }
 
   function stopObserver() {
     if (observer) { observer.disconnect(); observer = null; }
     if (scanTimer !== null) { clearTimeout(scanTimer); scanTimer = null; }
+    graphRefresh.cancel();
   }
 
   // -------------------------------------------------------------------------

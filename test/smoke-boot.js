@@ -243,11 +243,13 @@ function pump(n) {
 console.log('\n\x1b[36m━━━ GFI 假宿主冒烟测试 ━━━\x1b[0m');
 
 for (const f of ['ns', 'i18n', 'config', 'spatial', 'data', 'physics', 'effects', 'timeline', 'datasource', 'warm',
-                 'camera', 'renderer', 'toolbar', 'interaction', 'overlay']) {
+                 'livewatch', 'camera', 'renderer', 'toolbar', 'interaction', 'overlay']) {
   load(`src/${f}.js`);
 }
 check('除 main.js 外的模块全部加载完成', !!sandbox.GFI.Overlay && !!sandbox.GFI.Renderer && !!sandbox.GFI.Warm);
 check('i18n 也加载完成（config.js 依赖它生成设置面板）', !!sandbox.GFI.i18n);
+check('livewatch 也加载完成（index.js 依赖它做图谱自动刷新）',
+  !!sandbox.GFI.LiveWatch && typeof sandbox.GFI.LiveWatch.createScheduler === 'function');
 check('设置 schema 已由 i18n 生成（不是空数组）',
   Array.isArray(sandbox.GFI.settingsSchema) && sandbox.GFI.settingsSchema.length > 20,
   `schema ${sandbox.GFI.settingsSchema.length} 条，首条 = ${sandbox.GFI.settingsSchema[0] && sandbox.GFI.settingsSchema[0].key}`);
@@ -414,7 +416,12 @@ async function syncSettlePath() {
   if (!entry) { a.destroy('sync path (skipped)'); return; }
 
   // 复刻 index.js 的 reveal 判据：抢跑 → playReveal = true
-  const r = a.setData(entry.data.nodes, entry.data.links, { layout: entry.layout, reveal: true });
+  // ⚠ 数据必须用【原始的】demo.nodes —— 预热条目里【没有 data 字段】了。
+  //   这是刻意的结构约束：缓存只提供 layout，数据一律现查。
+  //   （实机踩过：拿缓存里的 data 当数据 → 删页面/改正文之后图谱再也不更新）
+  check('⚠ 预热条目里没有 data 字段（结构上禁止误用缓存数据）',
+    entry.data === undefined, `entry.data = ${JSON.stringify(entry.data)}`);
+  const r = a.setData(demo.nodes, demo.links, { layout: entry.layout, reveal: true });
   check('② 全部节点命中抢跑布局', r.warm && r.adopted === r.n, `adopted=${r.adopted}/${r.n}`);
 
   const gb = GFI.Data.bounds(a.data, true);
@@ -603,7 +610,7 @@ async function endToEnd() {
   const a = GFI.Main.boot({ nodes: [], links: [] });
   const cached = GFI.Warm.peek(GFI.Warm.keyOf(req));
   check('e2e①：第二次进入直接命中缓存', !!cached);
-  const r1 = a.setData(cached.data.nodes, cached.data.links, { layout: cached.layout, reveal: false });
+  const r1 = a.setData(demo.nodes, demo.links, { layout: cached.layout, reveal: false });
   check('e2e①：一步到位', r1.warm && r1.adopted === r1.n, `${r1.adopted}/${r1.n}`);
   pump(2);
   check('e2e①：loader 收起 + 画布完全不透明（重开不该再淡入）',
@@ -628,7 +635,7 @@ async function endToEnd() {
     sync ? `${sync.ticks} tick / 实测墙钟 ${syncMs}ms` : '（null → 会退化成实时沉降）');
   if (!sync) { b.destroy('e2e cold'); return; }
 
-  const r2 = b.setData(sync.data.nodes, sync.data.links, { layout: sync.layout, reveal: true });
+  const r2 = b.setData(data.nodes, data.links, { layout: sync.layout, reveal: true });
   check('e2e②：一步到位（全部命中）', r2.warm && r2.adopted === r2.n, `${r2.adopted}/${r2.n}`);
 
   // 相机一次算对

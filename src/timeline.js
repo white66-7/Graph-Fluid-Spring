@@ -62,41 +62,6 @@
     const parentOf = new Int32Array(D.n);
     const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 
-    // =======================================================================
-    // 🌟 按秩推进（Rank-paced playback，2026-10-07）
-    // =======================================================================
-    // 旧实现：cutoff 每帧推进固定【毫秒】数（range.duration / baseDurationSec）。
-    // 两种真实分布都会把它打坏（实测见 test/timeline-pacing-probe.js）：
-    //
-    //   · 大簇 —— 批量导入 / 重建 DB 后一大批页面共享同一个 createdAt，
-    //     applyCutoff 在某【一帧】里把整簇置 want=1，等于"炸一下"，
-    //     随后是长时间无事发生。
-    //   · 稀疏年代 —— 中间几个月没有新页面，白耗掉成比例的时长。
-    //
-    //   实测：3000 节点、60% 挤在导入日 ⇒ 峰值一帧揭示 982 个、
-    //   达成 50% 只用了 0.02s，剩下 20 秒几乎空转。
-    //   反过来 100 节点时 94% 的帧什么都没发生（全程 28 秒干等）。
-    //
-    // 新实现：游标换成【已轮到的节点序号 rank】，每帧推进 rate 个序号而非毫秒。
-    //
-    //   🌟 rate 现在是【用户直接设的旋钮】（config.timeline.revealRate，节点/秒），
-    //     全程时长 = pacedCount / rate 是它的【结果】，不是设定值。
-    //     曾经反过来做（设总时长 → 反推速率 → 再拿护栏钳速率），代价是：
-    //       · 同一个时长小图太快、大图太慢，用户没法用一个数表达两边；
-    //       · 护栏会把用户显式设的时长顶掉（设 60 秒卡回 32 秒）。
-    //     直接设速率就没有反推、没有护栏、没有覆盖。
-    //
-    // ⚠ 光有 rank 是【摊不开】大簇的：cutoff = sortedTs[k] 一步就把整簇置 want=1。
-    //   所以还必须配一个每帧「揭示额度」（见 setCutoff 的 revealBudget）——
-    //   rank 决定【什么时候轮到这批】，额度决定【这批分多少帧冒出来】。缺一不可：
-    //     · 只上 rank 不上额度 → rank 把整簇该用的时长（如 704/1200 ⇒ 16 秒）
-    //       排给了它，可它一帧就放完了，那 16 秒变成纯死等。
-    //     · 只上额度不上 rank（= 旧的按毫秒推进 + 额度）→ 进度条按【时间戳】走、
-    //       画面按【额度】放，两者脱节。实测（N=1200、60% 同一毫秒）t=15s 时
-    //       进度条才 53.6%，画面却已经放出 75%，最大差 21 个百分点。
-    //   两者都用 rate 计量，所以稳态下额度 = rate·dt 恰好等于供给量、零额外延迟
-    //   （实测均匀分布下全程 28.02s vs 28.02s，差 0.00%），只在成簇时限流 ——
-    //   本质是一个免费的突发平滑器。
     const sortedTs = (function () {
       const a = [];
       for (let i = 0; i < D.n; i++) {
@@ -303,7 +268,7 @@
         };
       }
 
-      // 情况 3：初始创世节点（图谱完全为空）
+      // 情况 3：初始创世节点
       const angle = jitter(i, 34, Math.PI);
       const r = 20 + jitter(i, 35, 30);
       return {
@@ -346,10 +311,6 @@
         if (p !== -1) revealSlot[p]++;
         nPending++;
       }
-      // ⚠ 抖动半径要的是【本帧实际会揭示的数量】，不是待揭示总数 ——
-      //   Obsidian 的 I = g.length = 本次 setData 真正加进去的节点数，
-      //   而我们有逐帧揭示额度，所以实际数 = min(待揭示, budget)。
-      //   用错会高估抖动半径（实测 13.37wu vs 上界 9.84wu）。
       revealBatch = Math.min(nPending, budget);
 
       for (let i = 0; i < D.n; i++) {
@@ -357,36 +318,22 @@
         const isFading = D.fadeT[i] === D.fadeT[i];
 
         if (want === 1 && D.visible[i] === 0) {
-          // 🌟 每帧揭示额度（突发平滑器）。超额的 continue 掉 —— 它们已经
-          //   want=1，下一帧 setCutoff 开头的 hasPendingReveal() 会把队列续上。
-          //   稳态下额度 = rate·dt 恰好等于供给量，这里从不触发。
+
           if (revealed >= budget) continue;
 
-          // ---- 揭示：Obsidian 母体分裂与反冲爆发 ----
-          // 🌟 T1 pass B：槽位游标倒序发放 —— pass A 存的是兄弟总数 k，
-          //   这里逐个 -- 后得到 k-1 … 0，配合黄金角把兄弟在圆周上错开；
-          //   循环结束时每个用过的槽位恰好减回 0，天然为下一帧复位。
           const p = parentOf[i];
           const spawn = anchorFor(i, visCentroid, p, p !== -1 ? --revealSlot[p] : -1);
           D.x[i] = spawn.x;
           D.y[i] = spawn.y;
 
           if (obsidianMode) {
-            // 🌟 Obsidian 模式：**没有**喷射初速、**没有**母节点后坐力。
-            //   实测 app.js 的 setData：新节点只是被放到「已存在邻居的均值位置
-            //   ± 随机撒布」，除此之外没有任何一处注入速度，动起来全靠力模拟。
-            //   而这两样（22wu/s 初速 + 母体反冲）正是「出生太急」的主因 ——
-            //   一个节点出生会把整张图连带踢一下。
             D.vx[i] = 0;
             D.vy[i] = 0;
           } else {
-            // 🌟 1. 子节点爆发速度（向外猛冲）
             const kickSpeed = 22.0 + jitter(i, 41, 4.0);
             D.vx[i] = spawn.dirX * kickSpeed;
             D.vy[i] = spawn.dirY * kickSpeed;
 
-            // 🌟 2. 母节点后坐力反冲（牛顿第三定律）
-            // 子节点向外射出的同时，母节点被向后推退，连线弹簧瞬间被拉得极紧并产生回弹振荡
             if (spawn.parentIdx !== -1) {
               const pIdx = spawn.parentIdx;
               const recoilMass = 1 / (1 + 0.18 * Math.sqrt(D.deg[pIdx]));
@@ -396,20 +343,14 @@
             }
           }
 
-          // 🌟 3. 力的权重首帧全开，连线弹簧立即介入工作
           D.simWeight[i] = 1.0;
 
-          // 🌟 4. 取消延迟错峰，诞生即刻爆发
           fx.beginReveal(i, 0);
           revealed++;
         } else if (want === 1 && D.visible[i] === 1 && isFading) {
           // ---- 撤销淡出 ----
           if (fx.cancelHide(i)) revealed++;
         } else if (want === 0 && D.visible[i] === 1 && !isFading) {
-          // ---- 隐藏 ----
-          // instantHide：倒带场景（重新开始播放）—— 必须一帧清干净。
-          // 若走 beginHide 的 0.26s 淡出，节点在这段时间里仍是 visible=1，
-          // 紧接着的揭示就会全部命中上面那个 cancelHide 分支、绕过揭示额度。
           if (instantHide) fx.hideNow(i); else fx.beginHide(i);
           hidden++;
         }

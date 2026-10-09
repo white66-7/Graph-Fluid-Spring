@@ -58,7 +58,7 @@ function load(rel) {
   vm.runInContext(code, sandbox, { filename: rel });
 }
 
-for (const f of ['ns', 'i18n', 'config', 'spatial', 'data', 'physics', 'effects', 'timeline', 'datasource', 'warm']) {
+for (const f of ['ns', 'i18n', 'config', 'spatial', 'data', 'physics', 'effects', 'timeline', 'datasource', 'warm', 'livewatch']) {
   load(`src/${f}.js`);
 }
 
@@ -2065,14 +2065,116 @@ section('18. 时间线节奏 —— 按秩推进 + 每帧揭示额度');
 })();
 
 // ===========================================================================
+// 22. 库变动 → 图谱刷新：过滤器必须既不漏、也不自激
+// ===========================================================================
+// 实机反馈：「删掉某些页面、改了部分正文，图谱自加载后就不再更新」。
+// 修法的一半是"数据一律现查"（见 §19），另一半是这里 —— 加刷新机制。
+// 但这个机制有两条很容易踩的纪律：
+//   ① 不能自激：刷新会改画布、也会改我们自己的工具栏（innerHTML 换图标、
+//      textContent 写日期），而那些正好都是"内容类变动"。
+//      不过滤的话就是 刷新 → 改 DOM → 又触发 → 又刷新 …… 死循环。
+//   ② 不能太贵：每次刷新 = 一次完整查库（300~500ms）。所以必须防抖，
+//      而且"没挂载就不刷"。
+const testLiveWatch = (function () {
+  const LW = GFI.LiveWatch;
+  check('LiveWatch 模块已加载', !!LW && typeof LW.looksLikeContentEdit === 'function');
+
+  const mkEl = (tag, cls, parent) => ({
+    nodeType: 1, tagName: String(tag).toUpperCase(), className: cls || '',
+    parentNode: parent || null, childNodes: [],
+    querySelector() { return null; },
+  });
+  const mkText = (v) => ({ nodeType: 3, nodeValue: v, parentNode: null });
+  const mut = (type, target, addedNodes) => ({ type, target, addedNodes: addedNodes || [] });
+
+  const body = mkEl('div', 'app-body');
+  const contentP = mkEl('p', 'block-content', body);
+  const gfiRoot = mkEl('div', 'gfi-root', body);
+  gfiRoot.__gfiSkip = true;
+  const gfiLabel = mkEl('span', 'gfi-label', gfiRoot);
+  const settingsPanel = mkEl('div', 'settings-panel', body);
+
+  // ---- ① 真的编辑：必须认得出来 ----
+  check('新增 <p> 算内容变动', LW.looksLikeContentEdit([mut('childList', contentP, [mkEl('p', '', contentP)])]) === true);
+  check('characterData 算内容变动（改正文就是这种）',
+    LW.looksLikeContentEdit([mut('characterData', mkEl('span', 'x', contentP))]) === true);
+  check('新增非空文本节点算内容变动',
+    LW.looksLikeContentEdit([mut('childList', contentP, [mkText('新写的正文')])]) === true);
+  check('深层容器里含 <p> 也算（编辑器插入的是外层 div）', (() => {
+    const wrap = mkEl('div', 'wrap', contentP);
+    wrap.querySelector = (sel) => (/p/.test(sel) ? mkEl('p') : null);
+    return LW.looksLikeContentEdit([mut('childList', contentP, [wrap])]) === true;
+  })());
+
+  // ---- ② 噪音：不能误判 ----
+  check('纯空白文本节点不算内容变动',
+    LW.looksLikeContentEdit([mut('childList', contentP, [mkText('   \n  ')])]) === false);
+  check('新增 <canvas> / <style> 不算内容变动',
+    LW.looksLikeContentEdit([
+      mut('childList', body, [mkEl('canvas')]),
+      mut('childList', body, [mkEl('style')]),
+    ]) === false);
+  check('空变动数组不算', LW.looksLikeContentEdit([]) === false && LW.looksLikeContentEdit(null) === false);
+
+  // ---- ③ 自激闸门：我们自己的容器一律忽略 ----
+  check('⚠ 落在 .gfi-root 里的 characterData 被忽略（否则自激死循环）',
+    LW.looksLikeContentEdit([mut('characterData', gfiLabel)]) === false);
+  check('⚠ 新增到 .gfi-root 里的 <span> 被忽略',
+    LW.looksLikeContentEdit([mut('childList', gfiRoot, [mkEl('span', 'gfi-btn', gfiRoot)])]) === false);
+  check('⚠ 带 __gfiSkip 标记的容器内部一律忽略（无需 .gfi- 类名）', (() => {
+    const marked = mkEl('div', '随便什么', body);
+    marked.__gfiSkip = true;
+    const inner = mkEl('span', 'inner', marked);
+    return LW.looksLikeContentEdit([mut('characterData', inner)]) === false;
+  })());
+  check('设置面板里的 input 变动被忽略（改设置不该白查一次库）',
+    LW.looksLikeContentEdit([mut('childList', settingsPanel, [mkEl('input', '', settingsPanel)])]) === false);
+
+  // ---- ④ 调度器：防抖 + 没挂载不刷 + cancel ----
+  return new Promise((resolve) => {
+    let calls = 0;
+    const s = LW.createScheduler({ debounceMs: 20, isMounted: () => true, refresh: () => { calls++; } });
+    s.notify([mut('childList', contentP, [mkEl('p')])], 'a');
+    s.notify([mut('characterData', mkEl('span', 'x', contentP))], 'b');
+    s.notify([mut('childList', contentP, [mkText('更多正文')])], 'c');
+    check('多次变动会合并（防抖窗口内只排一次）', s.pending === true);
+
+    const s2 = LW.createScheduler({ debounceMs: 20, isMounted: () => true, refresh: () => {} });
+    check('我们自己的变动不排队', s2.notify([mut('characterData', gfiLabel)], 'self') === false);
+
+    const s3 = LW.createScheduler({ debounceMs: 20, isMounted: () => false, refresh: () => {} });
+    check('图谱没挂载时不排队（下次打开会现查）',
+      s3.notify([mut('childList', contentP, [mkEl('p')])], 'unmounted') === false);
+
+    setTimeout(() => {
+      check('防抖后只刷新了一次（3 次变动 → 1 次）', calls === 1, `refresh 调用 ${calls} 次`);
+      check('刷新结束后 pending 归假', s.pending === false);
+
+      let calls2 = 0;
+      const s4 = LW.createScheduler({ debounceMs: 20, isMounted: () => true, refresh: () => { calls2++; } });
+      s4.notify([mut('childList', contentP, [mkEl('p')])], 'cancel-test');
+      s4.cancel();
+      check('cancel 之后 pending 归假', s4.pending === false);
+      setTimeout(() => {
+        check('cancel 真的阻止了刷新（图谱关闭时不该再查库）', calls2 === 0, `refresh 调用 ${calls2} 次`);
+        resolve();
+      }, 40);
+    }, 60);
+  });
+})();
+
+// ===========================================================================
 // 结果
 // ===========================================================================
-console.log(`\n${'═'.repeat(60)}`);
-if (fail === 0) {
-  console.log(`\x1b[32m全部通过\x1b[0m  ${pass} 项`);
-} else {
-  console.log(`\x1b[31m失败 ${fail} 项\x1b[0m / 通过 ${pass} 项`);
-  console.log('失败清单:');
-  for (const f of failures) console.log('  · ' + f);
-}
-process.exit(fail === 0 ? 0 : 1);
+//   §22 是异步的（要等真实定时器），所以结果必须等它跑完再打。
+testLiveWatch.then(() => {
+  console.log(`\n${'═'.repeat(60)}`);
+  if (fail === 0) {
+    console.log(`\x1b[32m全部通过\x1b[0m  ${pass} 项`);
+  } else {
+    console.log(`\x1b[31m失败 ${fail} 项\x1b[0m / 通过 ${pass} 项`);
+    console.log('失败清单:');
+    for (const f of failures) console.log('  · ' + f);
+  }
+  process.exit(fail === 0 ? 0 : 1);
+});
