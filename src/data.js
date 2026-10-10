@@ -87,7 +87,7 @@
       const key = s < t ? s * 0x100000 + t : t * 0x100000 + s;
       if (seenEdge.has(key)) continue;   // 去重：无向图，同一对只留一条
       seenEdge.add(key);
-      links.push({ s, t, label: lk.label });
+      links.push({ s, t });
     }
     const m = links.length;
 

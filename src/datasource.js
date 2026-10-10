@@ -173,7 +173,7 @@
       const key = s < t ? s + '|' + t : t + '|' + s;
       if (edgeSeen.has(key)) return;
       edgeSeen.add(key);
-      links.push({ source: s, target: t, label });
+      links.push({ source: s, target: t });
     }
 
     // 块查询 [[]]引用
@@ -303,7 +303,7 @@
     for (let i = 0; i < crossCount; i++) {
       const a = hubs[(rnd() * clusters) | 0];
       const b = hubs[(rnd() * clusters) | 0];
-      if (a !== b) links.push({ source: a, target: b, label: 'rel' });
+      if (a !== b) links.push({ source: a, target: b});
     }
 
     return { nodes, links };

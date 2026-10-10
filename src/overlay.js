@@ -8,11 +8,6 @@
   const STYLE_ID = 'gfi-overlay-styles';
 
   const CSS = `
-/* ⚠ overflow:hidden 不是装饰：这个容器是 position:absolute + inset:0，
-   尺寸完全跟随 #global-graph。如果 root 的定位上下文不是我们以为的那个
-   （比如它是 static，我们的 absolute 就会挂到更高的祖先上），容器会撑成
-   整屏大小、盖住设置面板之类的 UI，把滚轮/点击一起吃掉。
-   加上 overflow:hidden 之后，它至少不会把自己的内容画到 root 之外。 */
 .gfi-root { position:absolute; inset:0; overflow:hidden; z-index:1; }
 .gfi-canvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; }
 
@@ -29,8 +24,6 @@
   font: 11.5px/1.15 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
   color: rgba(255,255,255,0.78);
   user-select:none; -webkit-user-select:none;
-  /* 中文没有 nowrap 时会逐字换行 —— flex 子项被压缩后就是竖排。
-     必须同时禁掉收缩，否则容器一窄文字照样会被挤成两行。 */
   white-space: nowrap;
 }
 .gfi-btn {
@@ -78,9 +71,7 @@
 }
 .gfi-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
 
-/* 加载指示 —— 只在我们已经接管、但画布上还没有内容的那个窗口里出现。
-   它替代的是"原生图谱继续显示"那段：既然要的是"点进去就是我的样式"，
-   那等待期间就不该再让原生图谱露脸，但也不能是一片空白。 */
+/* 加载屏 */
 .gfi-loader {
   position:absolute; inset:0; z-index:5;
   display:flex; align-items:center; justify-content:center; gap:10px;
@@ -211,9 +202,7 @@
   /**
    * @param {HTMLElement} root #global-graph
    * @param {object} [opts] { nativeVisible:boolean }
-   *        nativeVisible 默认 false —— 挂载即接管（把原生画布藏掉、露出我们的
-   *        加载指示）。这是"点进去就是我的样式"的前提：只要还让原生图谱显示，
-   *        用户必然先看到它，再看到我们。
+   *        nativeVisible 默认 false —— 挂载即接管
    * @returns {object|null}
    */
   function mount(root, opts) {
@@ -240,12 +229,6 @@
       rootPosition: root.style.position,
     };
     
-    // ⚠ 只在 root 是 static 时才改成 relative —— 这是为了给我们的 absolute
-    //   容器建立定位上下文。如果 root 本来就有定位（Logseq 通常给了 absolute
-    //   或 relative），就【不要碰它】。
-    //   实机排查"设置面板滚不动/点不动"时，第一件要确认的事就是
-    //   `.gfi-root` 的 rect 是否等于 #global-graph 的 rect；不相等就说明
-    //   定位上下文不是这里，容器撑成了整屏。
     if (GFI.topWin.getComputedStyle(root).position === 'static') {
       root.style.position = 'relative';
     }
@@ -253,16 +236,13 @@
     // ---- 容器 ----
     const container = doc.createElement('div');
     container.className = 'gfi-root';
-    // 给 i18n 的面板文案改写打标记：它靠"文字内容反查"定位设置面板的节点，
-    // 万一图谱里恰好有 {label} 的文字、又落在疑似 settings 的子树里，
-    // 就会被误改。这个标记让它整棵跳过我们的容器。
     container.__gfiSkip = true;
 
     const canvas = doc.createElement('canvas');
     canvas.className = 'gfi-canvas';
     container.appendChild(canvas);
 
-    // 加载指示。默认隐藏 —— 只有 main.js 明确说"还没内容"时才亮。
+    // 加载指示。默认隐藏
     const loader = doc.createElement('div');
     loader.className = 'gfi-loader';
     loader.hidden = true;
@@ -299,12 +279,6 @@
           resizeRaf = null;
           if (!resizeCb) return;
           const m = measure();
-          // ⚠ 量到 0 就直接丢掉。容器在原生模式（或还没显示）时是 display:none，
-          //   量出来是 0×0 —— 拿它去 resize 会把相机与画布一起打成 0，
-          //   回到我们的视图时就是一片空白，而且 ResizeObserver 不会再触发一次
-          //   （尺寸"没变"）。原来是靠一个 pendingResize 标志位卡住，
-          //   但那个标志位在 rAF 回调抛错时会永久停在 true，ResizeObserver
-          //   从此彻底失效 —— 用一个"排队 id"就不会有这种粘滞状态。
           if (m.w <= 1 || m.h <= 1) return;
           resizeCb(m.w, m.h);
         });
@@ -390,13 +364,6 @@
     return api;
   }
 
-   // ---------------------------------------------------------------------------
-  // 时序探针 —— 进图谱那几百毫秒里到底发生了什么，靠它定论
-  // ---------------------------------------------------------------------------
-  // 为什么必须有：观感（"先看到原生图谱"）是【宿主 + 我们】的时序产物。
-  // 读代码只能证明我们会怎么切，证明不了宿主什么时候把 #global-graph 交出来、
-  // 原生 Pixi 是什么时候起画的。所以把每个分界点记成一条带时间戳的记录，
-  // 事后 `__GFI__.timeline()` 就能给出客观顺序，而不是靠感觉描述。
   const MAX_EVENTS = 80;
   const origin = (() => { try { return GFI.topWin.performance.now(); } catch (e) { return 0; } })();
   let events = [];
@@ -417,11 +384,6 @@
 
   function clearEvents() { events = []; }
 
-  // ---- 原生图谱是什么时候出现在 DOM 里的 ----
-  // 探针脚本可能比这个模块晚加载，所以先同步查一次。
-  // ⚠ 这两行必须排在 events 声明【之后】：record 会往 events 里写，
-  //   提前调用就是一次 TDZ 抛错（`Cannot access 'events' before initialization`），
-  //   而且它会连带把 __PIXI_APP_INIT__ 的注册一起带走。
   const initialRoot = findRoot();
   record('overlay.js 加载', initialRoot ? '#global-graph 已在 DOM' : '#global-graph 还不在');
 
