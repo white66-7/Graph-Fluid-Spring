@@ -331,8 +331,8 @@
   function beginFetch() {
     const t0 = performance.now();
     return GFI.DataSource.fetchData({
-      source: ((GFI.config.runtime||{}).dataSource),
-      demoCount: ((GFI.config.runtime||{}).demoCount),
+      source: ((GFI.config.runtime || {}).dataSource),
+      demoCount: ((GFI.config.runtime || {}).demoCount),
       includeParentLinks: false,
     }).then((data) => {
       console.log(`[GFI] 数据就绪 ${Math.round(performance.now() - t0)}ms（${data.nodes.length} 节点）`);
@@ -490,8 +490,8 @@
     if (!graphApi) return null;
     afterDataChanged('reloadData');
     const data = await GFI.DataSource.fetchData({
-      source: ((GFI.config.runtime||{}).dataSource),
-      demoCount: ((GFI.config.runtime||{}).demoCount),
+      source: ((GFI.config.runtime || {}).dataSource),
+      demoCount: ((GFI.config.runtime || {}).demoCount),
       includeParentLinks: false,
     });
     lastRaw = data;
@@ -558,18 +558,10 @@
   function activateNode(node) {
     if (!node) return;
     const L = window.logseq;
-    if (!L) return;
-    const name = node.label;
-    const uuid = node.uuid;
+    if (!L || !L.App) return;
+    const name = node.pageName || node.label;
     try {
-      // 优先按 uuid 跳（更精确，页名可能被改名过）
-      if (uuid && L.App && typeof L.App.pushState === 'function') {
-        L.App.pushState('page', { name }, {});
-        return;
-      }
-      if (L.App && typeof L.App.pushState === 'function' && name) {
-        L.App.pushState('page', { name }, {});
-      }
+      if (name) L.App.pushState('page', { name }, {});
     } catch (e) {
       console.warn('[GFI] 跳转失败', e);
     }
@@ -778,7 +770,7 @@
         return now;
       };
     }
-  } catch (e) {}
+  } catch (e) { }
 
   function start() {
     try {
@@ -801,7 +793,7 @@
         // 插件真的要走了才摘 Pixi 钩子。
         // ⚠ 不能挪进 unmountGraph()：图谱视图来来去去都会走那条路径，
         //   而摘掉钩子会整整漏掉下一个 Application
-        try { GFI.Overlay.releasePixiCapture(); } catch (e) {}
+        try { GFI.Overlay.releasePixiCapture(); } catch (e) { }
       });
     }
 

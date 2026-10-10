@@ -1,23 +1,4 @@
-/*
- * GFI.Timeline — 时间旅行（Obsidian 细胞分裂动态模型）
- * ===========================================================================
- * 可见性判定只有一次比较：  !(createdAt[i] > cutoff)
- *   因为 createdAt 缺失存的是 NaN，而 NaN > cutoff 恒为 false
- *   → 没有时间戳的节点永远可见，无需存在性分支。
- *
- * ── Obsidian 风格核心机制：母体细胞分裂（Cell Budding） ──
- *
- * 1. 细胞分裂式诞生：
- *    新节点出生时不再摆放在抽象的“邻居几何中心”，而是直接紧贴其引用的母节点
- *    （母体）诞生。
- *
- * 2. 动量守恒与后坐力（Action-Reaction）：
- *    子节点诞生瞬间被赋予背离母体的喷射初速度；同时母节点承受反向后坐力推力。
- *    原本长度接近 0 的连线被瞬间拉伸紧绷，产生强烈的弹簧回弹与团簇震颤。
- *
- * 3. 首帧全受力：
- *    simWeight 直接从 1.0 开始，连线拉力第 1 帧全力介入，杜绝“隐形中弹完”的现象。
- */
+/* 时间旅行 - Obsidian 细胞分裂动态模型 */
 (function (GFI) {
   'use strict';
   if (GFI.Timeline) return;
@@ -46,22 +27,20 @@
     const _centroid = { x: 0, y: 0, k: 0 };
     let lastPulseAt = -1e9;
 
-    //  出生缓动模式（config.pop.mode）。'obsidian' 时【不注入】喷射初速、
-    //   也不加母节点后坐力 —— 实测 Obsidian 的 setData 里没有这两样。
+    // 节点出生样式
     const obsidianMode = cfg.pop.mode === 'obsidian';
 
-    // 本帧新生节点总数（pass A 填）。只给 Obsidian 落点公式的抖动半径用：
-    //   app.js 里 F = 60·√I，I = 本批新节点数。
+    // 本帧新生节点总数，通过pass A用于 Obsidian 落点公式的抖动半径
     let revealBatch = 1;
 
-    // 🌟 T1 出生分槽的复用缓冲 —— create 期一次分配，逐帧零分配。
-    //   revealSlot[p] 两阶段复用：pass A 当「本帧子节点计数」，pass B 当「槽位游标」，
-    //   pass B 结束时恰好减回 0，无需清理；每帧开头 fill(0) 清掉上一帧的残值。
-    //   GOLDEN = 黄金角 137.5°：整数倍轮转在圆周上均匀散开，任意子数都不重缝。
-    const revealSlot = new Int32Array(D.n);
+
+    //   revealSlot[p] pass A当本帧子节点计数，pass B当槽位游标
+    const revealSlot = new Int32Array(D.n);    
     const parentOf = new Int32Array(D.n);
+    //   GOLDEN = 黄金角 137.5°
     const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 
+    // 时间戳排序
     const sortedTs = (function () {
       const a = [];
       for (let i = 0; i < D.n; i++) {
@@ -71,9 +50,10 @@
       a.sort((x, y) => x - y);
       return Float64Array.from(a);
     })();
+
     const pacedCount = sortedTs.length;   // 有时间戳的节点总数
 
-    // 二分：sortedTs 中 <= ms 的元素个数
+    // 二分查找 sortedTs中小于等于 ms的元素个数
     function rankUpTo(ms) {
       let lo = 0, hi = pacedCount;
       while (lo < hi) {
@@ -83,47 +63,33 @@
       return lo;
     }
 
-    // rank → cutoff。rank 是浮点游标，floor 一下就是「本轮该揭示到第几个节点」。
-    // 注意这里给的是第 k 个节点的【时间戳】，同时间戳的兄弟会被一并置 want=1，
-    // 由揭示额度负责把它们摊到后续若干帧。
     function cutoffAtRank(rank) {
       const k = Math.floor(rank);
       if (k <= 0) return range ? range.min - 1 : -Infinity;   // 还差一点才轮到第一个
       return sortedTs[Math.min(pacedCount, k) - 1];
     }
 
-    // 还有没有已判定该出现、但被额度挡在门外的节点
+    // 判定要出现但未出现的节点
     function hasPendingReveal() {
       const want = D.wantVisible, vis = D.visible;
       for (let i = 0; i < D.n; i++) if (want[i] && !vis[i]) return true;
       return false;
     }
 
+    // 用户自定义速率(节点/秒),设成0时套用 Obsidian公式
     tl.pacedCount = pacedCount;
-    // 🌟 速率：用户设的数（节点/秒）；设成 0 = 自动套用 Obsidian 的公式。
-    //
-    //   Obsidian 实测（app.js，renderProgression）：
-    //     progressionSpeed = clamp(0.5·√边数, 5, 100)     ← 节点/秒
-    //     progression      = 1 + floor(速率 × 已过秒数)   ← 按墙钟【线性】，无缓动
-    //   所以 Obsidian 的 rhythm 就是「恒定节点数/秒」，只是速率随边数按 √ 增长。
-    //
-    //   全程时长是速率的【结果】，不是设定值。clamp 只防手改配置改出
-    //   负数 / Infinity 导致除零或时间倒流。
+
     const rawRate = Number(cfg.timeline.revealRate);
     tl.rateAuto = rawRate === 0;
     tl.rate = tl.rateAuto
-      ? clamp(0.5 * Math.sqrt(D.m), 5, 100)     // ← Obsidian 原公式，逐字照抄
+      ? clamp(0.5 * Math.sqrt(D.m), 5, 100)     //  Obsidian 公式
       : clamp(rawRate || 0, 0.05, 200);
     tl.playDurationSec = pacedCount / tl.rate;
-    // ⚠ 游标初值必须与 cutoff 初值一致。create 时 cutoff = range.max（全可见），
-    //   所以 rank 也得是 pacedCount；字面量里那个 rank: 0 只是占位。
-    //   不补这一句的后果：中途按播放（没经过倒带，也没拖过滑块）会从 rank 0
-    //   起跳，时间轴直接从头重放一段。
+
+
     tl.rank = rankUpTo(tl.cutoff);
 
-    // =======================================================================
-    // 脉冲（可选的背景扰动波）
-    // =======================================================================
+    // 脉冲
     function changedCentroid() {
       let cx = 0, cy = 0, k = 0;
       for (let i = 0; i < D.n; i++) {
@@ -135,10 +101,6 @@
     }
 
     function maybePulse(forward, origin, viewportWorldHeight) {
-      // 🌟 T2：shock.magnitude = 0（默认）时 pulse 必然早退、波根本不会发射 ——
-      //   在做任何 O(n) 工作（centroid/bounds）之前就返回。旧代码走到最后的
-      //   sim.reheat(0.5) 是【无条件】的：波没发出去，图却被重热得比
-      //   reheat.timelinePlay(0.32) 还狠，播放期间每 pulseThrottleMs 白翻腾一次。
       if (!(cfg.shock.magnitude > 0)) return;
 
       const now = GFI.util.now();
@@ -165,12 +127,7 @@
       if (fired) sim.reheat(cfg.reheat.pulse);
     }
 
-    // =======================================================================
     // 揭示锚点：Obsidian 母体细胞分裂计算
-    // =======================================================================
-    // 母体 = 度数最高且【已可见】的邻居。⚠ 必须在本帧任何 beginReveal 把
-    // 兄弟节点置 visible=1 之前调用 —— 否则同帧的兄弟可能互相选成母体，
-    // 每个节点的母体就取决于遍历顺序了。setCutoff 的 pass A 已保证这一点。
     function findParent(i) {
       const s = D.adjStart[i], e = D.adjStart[i + 1];
       let parentIdx = -1;
@@ -186,21 +143,9 @@
       return parentIdx;
     }
 
-    // parentIdx / slot 由 setCutoff 的两趟扫描传入（pass A 计数、pass B 发射），
-    // slot 是该节点在【同一母体同帧兄弟】里的黄金角序号。
+    // parentIdx / slot 由 setCutoff 的两趟扫描传入 - pass A计数、pass B发射
     function anchorFor(i, visCentroid, parentIdx, slot) {
-      // 🌟 情况 0：Obsidian 模式 —— 落在【所有已存在邻居的质心】± 随机撒布。
-      //   实测 app.js setData：
-      //     对新节点逐个求「already-present 邻居」的位置均值 (N/H, V/H)，
-      //     再加 (Math.random()-.5)*F 的抖动，F = sqrt(60*I*60) = 60·√I
-      //     （I = 本批新节点数；单位是 Obsidian 的世界单位，其 linkDistance=250）。
-      //
-      //   为什么这条比「紧贴单个母体 3px」更能把其他节点推开：
-      //   质心落点会同时压到【多个】邻居身上，碰撞/斥力把每一个都往外顶；
-      //   而贴单母体只顶一个。这正是在 Obsidian 里「节点出现把邻居推开」的由来
-      //   （力的层面它只做了 alpha:.3 重热，落点就是这里）。
-      //
-      //   抖动量按线长折算：Obsidian 的 ±30·√I / 250 ≈ 0.12·√I 倍 linkDistance。
+      // Obsidian 模式 —— 落在存在邻居的平均位置 ± 随机撒布。
       if (obsidianMode) {
         const s = D.adjStart[i], e = D.adjStart[i + 1];
         let cx = 0, cy = 0, k = 0;
@@ -218,25 +163,20 @@
             dirX: 0, dirY: 0,
           };
         }
-        // 没有已存在的邻居 → 落到下面的情况 2 / 3（外圈滑入 / 创世）
       }
 
-      // 情况 1：存在母节点 —— 紧贴母节点向外侧爆破喷射
+      // 存在母节点 —— 紧贴母节点向外侧爆破喷射
       if (parentIdx !== -1) {
         const px = D.x[parentIdx];
         const py = D.y[parentIdx];
 
-        // 基础方向：沿母体背离全图质心的外展方向
+        // 基础方向
         const cx = visCentroid && visCentroid.k > 0 ? visCentroid.x : px;
         const cy = visCentroid && visCentroid.k > 0 ? visCentroid.y : py;
         let angle = Math.atan2(py - cy, px - cx);
 
         if (Math.abs(px - cx) < 1e-3 && Math.abs(py - cy) < 1e-3) {
           angle = jitter(i, 30, Math.PI);
-          // 🌟 T1：黄金角轮转取代「±0.78rad 各自乱抖」—— 快进/拖滑块大步时
-          //   同一母体的多个子节点同帧从同一个 3px 点叠着喷出，靠碰撞逐帧顶开，
-          //   观感是「炸出一坨」。137.5° 一档让兄弟从第一个 tick 就彼此错开；
-          //   哈希微扰降到 ±14°，只负责去掉机械感。确定性哈希，无随机源。
           angle += slot * GOLDEN;
         } else {
           angle += slot * GOLDEN + jitter(i, 31, 0.25);
@@ -245,7 +185,7 @@
         const dirX = Math.cos(angle);
         const dirY = Math.sin(angle);
 
-        // 仅偏移 3 像素出生，视觉呈现出纯正的从母节点裂变而出的质感
+        // 偏移 3 像素出生
         return {
           parentIdx,
           x: px + dirX * 3.0,
@@ -255,7 +195,7 @@
         };
       }
 
-      // 情况 2：无母节点的孤立节点 —— 从外圈向内滑入
+      // 无母节点的孤立节点 —— 从外圈向内滑入
       if (visCentroid && visCentroid.k > 0) {
         const angle = jitter(i, 32, Math.PI);
         const dist = cfg.physics.linkDistance * 2.2 + jitter(i, 33, 40);
@@ -268,7 +208,7 @@
         };
       }
 
-      // 情况 3：初始创世节点
+      // 初始创世节点
       const angle = jitter(i, 34, Math.PI);
       const r = 20 + jitter(i, 35, 30);
       return {
@@ -436,6 +376,7 @@
 
       const prev = tl.cutoff;
       const rank = Math.min(pacedCount, tl.rank + step);
+      // rank转化为时间戳
       const next = cutoffAtRank(rank);
 
       const o = {
@@ -447,12 +388,14 @@
       }
       tl.setCutoff(next, o);
 
+      // 判断是否结束
       if (rank >= pacedCount && !hasPendingReveal()) {
         tl.playing = false;
         if (hooks.onPlayingChange) hooks.onPlayingChange(false);
       }
     };
 
+    // 刷新可见性
     D.wantVisible.fill(1, 0, D.n);
     return tl;
   }

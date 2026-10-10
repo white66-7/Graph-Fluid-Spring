@@ -1,32 +1,12 @@
-/*
- * GFI.DataSource — 图谱数据来源
- * ===========================================================================
- * ✅ 本模块的 schema 已于 M0 阶段在 Logseq 2.0.1 / DB 图谱上实测验证。
- *   实测结论见 fromLogseq() 的文档注释。
- *
- * 目标形状（与 Logseq 原生节点对齐）：
- *   Node { id:string, dbId:number, uuid:string, label:string,
- *          kind:'page'|'tag'|'journal'|'object'|'property',
- *          createdAt?:number(ms), icon?, color? }
- *   Link { source:string, target:string, label?:string }
- *
- * Logseq 2.0.1 是 DB 版，schema 与老文件版完全不同（:block/title 而非 :page/name）。
- * 从 app.asar 里读到的属性名：:block/title / :block/created-at / :block/refs /
- * :block/tags / :block/parent，过滤用 :logseq.property/hide? / :logseq.property/deleted-at
- * / :logseq.property/exclude-from-graph-view。
- *
- * datascriptQuery 有个坑：SDK 里它会 t.pop() 掉最后一个参数。
- *   不带 input 的查询单参调用是安全的；要传 input 必须补一个尾随占位参数。
- */
+/* 图谱数据来源 */
 (function (GFI) {
   'use strict';
   if (GFI.DataSource) return;
 
+  // window.logseq的存在性检查
   const LS = () => (typeof window.logseq !== 'undefined' ? window.logseq : null);
 
-  // =========================================================================
   // 工具
-  // =========================================================================
   function firstNumber(o, keys) {
     for (const k of keys) {
       const v = o[k];
@@ -50,8 +30,7 @@
     return v === undefined ? null : String(v);
   }
 
-  // 日记页标题的形态。Logseq 会按语言/设置给出不同格式，
-  // 之前只认两种，导致 "2026-09-15 Tue"（带星期）被误判成普通页面。
+  // 日记页标题格式
   const JOURNAL_PATTERNS = [
     /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(\s+\S{1,8})?$/,            // 2026-09-15 / 2026-09-15 Tue
     /^\d{4}年\d{1,2}月\d{1,2}日(\s+\S{1,8})?$/,                  // 2026年9月15日
@@ -75,25 +54,17 @@
     return 'page';
   }
 
-  // =========================================================================
   // 真实数据源
-  // =========================================================================
-  // 查询失败的计数与"只喊第一条"的闸门。
-  //
-  // ⚠ 为什么需要：冷启动时 Logseq 的 DB worker 还没起来，fromLogseq() 会连着
-  //   发 11 条查询、**全部失败**（\`db-worker has not been initialized\`）——
-  //   实机日志里就是 11 行一模一样的 warn，把真正有用的那几行淹掉。
-  //   现在第一条仍然照原样喊出来（它就是最有诊断价值的那条），后面的静默，
-  //   最后由 fromLogseq() 补一条摘要说明"共几条失败、第一条的错因是什么"。
-  //   信息一点没丢，噪音从 11 行降到 2 行。
+  // 在数据库未加载好时不重复报错
   let queryFailCount = 0;
   let queryFirstError = null;
 
   async function query(q) {
     const L = LS();
+    // 数据库接口与查询api函数存在检验
     if (!L || !L.DB || !L.DB.datascriptQuery) return null;
     try {
-      // 单参调用是安全的 —— SDK 只 pop 掉多余的 input 参数
+      // 单参安全
       const r = await L.DB.datascriptQuery(q);
       return Array.isArray(r) ? r : null;
     } catch (e) {
@@ -107,30 +78,18 @@
     }
   }
 
-  /**
-   * 从 Logseq 拉取节点与边。
-   *
-   * ── 以下是 M0 探针在 Logseq 2.0.1 / DB 图谱上的实测结论 ──
-   *   · Editor.getAllPages() 可用，且【直接带 createdAt】(ms epoch) 与 uuid
-   *       字段: createdAt, name, title, updatedAt, uuid, id, content, fullTitle
-   *       → 节点根本不用走 datascript，这是最省事也最可靠的一条路
-   *   · :logseq.property/hide? = true 有 93 条 → 必须过滤，否则图谱里全是内部实体
-   *   · :logseq.property/deleted-at 有 1 条 → 过滤
-   *   · :logseq.property/exclude-from-graph-view 查询成功但 0 条 → 保留在过滤里，无害
-   *   · :block/journal? 查询成功但 0 条 → 日记判据改用标题的日期格式
-   *   · 边：引用 61 条 / 标签 206 条 / 父子 248 条
-   */
+  // 从 Logseq 拉取节点与边。
   async function fromLogseq(opts) {
     opts = opts || {};
     const L = LS();
     if (!L) throw new Error('[GFI] logseq API 不可用');
-    // 本次取数的查询失败计数从零开始（见 query() 的说明）
+
     queryFailCount = 0;
     queryFirstError = null;
 
-    // ---------------- 需要排除的实体 ----------------
-    // 内部实体（模板、属性定义等）不隐藏掉的话会把真实结构淹掉
+    // 内部实体隐藏
     const excluded = new Set();
+
     const filterStats = [];
     const applyFilter = (name, rows) => {
       if (!rows) { filterStats.push(`${name}: 查询失败`); return 0; }
@@ -146,39 +105,19 @@
     applyFilter('hide?', await query('[:find ?e :where [?e :logseq.property/hide? true]]'));
     applyFilter('deleted-at', await query('[:find ?e :where [?e :logseq.property/deleted-at ?d]]'));
     applyFilter('exclude-from-graph-view', await query('[:find ?e :where [?e :logseq.property/exclude-from-graph-view ?v]]'));
-
-    // Logseq 自身的【属性定义实体】。
-    // 它们带 :logseq.property/type 属性（这就是"这是个属性定义"的判据）。
-    // 不过滤的话图谱里会混进 Alias / Due / State / Extends / User Name /
-    // Title Format / Published URL 这一大堆噪音节点 ——
-    // 正是"我明明没有这么多节点"的来源。
-    // ── 只滤「属性定义」，不动「类」 ──
-    //
-    // ⚠ 这里曾经把 logseq.class 的实体也一并滤掉，结果是图谱失去了骨架：
-    //   在 DB 版 Logseq 里，每个页面都被 logseq.class/Page 标记、日记被
-    //   logseq.class/Journal 标记 —— 原生图谱正是靠这些边形成
-    //   「Page 连着所有页面、Journal 连着所有日记」的枢纽结构。
-    //   真正该滤的是零度的属性定义（Alias / Due / State / Title Format …）。
-    //
-    // 判据：属性定义实体带 :logseq.property/type。这是个普通属性查询，
-    // datascript 支持；之前失败的其实是用到 namespace / clojure.string 的那两条。
     applyFilter('property-def', await query('[:find ?e :where [?e :logseq.property/type ?t]]'));
 
-    // 内置类枢纽黑名单（默认只有 logseq.class/Tag，见 config.data.hideClassIdents）。
-    // logseq.class/Page 与 logseq.class/Journal 【不在这里】—— 它们是有用的骨架。
     for (const ident of (GFI.config.data && GFI.config.data.hideClassIdents) || []) {
       applyFilter(`class:${ident}`,
         await query(`[:find ?e :where [?e :db/ident :${ident}]]`));
     }
 
-    // 名字黑名单：只剔除【零度节点】（见 config.data.hideNames 的说明）。
-    // 无论 property-def 查询成功与否都启用 —— 它管的是另一类东西：
-    // Logseq 由 {{include}} 之类的指令生成的幽灵页面，属性查询抓不到。
+    // 名字黑名单
     const nameBlocklist = new Set(
       (GFI.config.data && GFI.config.data.hideNames) || []
     );
 
-    // ---------------- 节点 ----------------
+    // 节点
     let rawPages = null;
     try {
       rawPages = await L.Editor.getAllPages();
@@ -187,13 +126,14 @@
     }
 
     const nodes = [];
+    // 已加入 nodes的节点ID
     const seen = new Set();
 
     if (Array.isArray(rawPages) && rawPages.length) {
       for (const p of rawPages) {
         const id = entityId(p);
         if (!id || seen.has(id) || excluded.has(id)) continue;
-        const label = firstString(p, ['title', 'name', 'fullTitle', 'originalName']) || id;
+        const label = firstString(p, ['title']) || id;
         seen.add(id);
         nodes.push({
           id,
@@ -201,11 +141,12 @@
           uuid: firstString(p, ['uuid']),
           label,
           kind: pageKind(p),
+          pageName: firstString(p, ['name']) || label,
           createdAt: firstNumber(p, ['createdAt', 'created-at']),
         });
       }
     } else {
-      // 退回路径：页面 API 不可用（例如未来版本改签名）
+      // getAllPages 失效时
       const rows = await query('[:find ?e ?title ?created :where [?e :block/title ?title] [?e :block/created-at ?created]]');
       if (rows) {
         for (const r of rows) {
@@ -220,31 +161,34 @@
       }
     }
 
-    // ---------------- 边 ----------------
+    // 边 
     const links = [];
+    // 去重
     const edgeSeen = new Set();
+
     function addLink(a, b, label) {
       const s = String(a), t = String(b);
       if (!seen.has(s) || !seen.has(t) || s === t) return;
-      const key = s < t ? s + ' ' + t : t + ' ' + s;
+      // 生成独特的key值
+      const key = s < t ? s + '|' + t : t + '|' + s;
       if (edgeSeen.has(key)) return;
       edgeSeen.add(key);
       links.push({ source: s, target: t, label });
     }
 
-    // 引用边：块所在页面 → 被引用的实体
+    // 块查询 [[]]引用
     const refRows = await query('[:find ?p ?r :where [?b :block/page ?p] [?b :block/refs ?r]]');
     if (refRows) for (const r of refRows) addLink(r[0], r[1]);
 
-    // 标签边：被标签的页面 → 标签实体
+    // 标签引用 #
     const tagRows = await query('[:find ?p ?t :where [?p :block/tags ?t]]');
     const tagIds = new Set();
     if (tagRows) {
+      // 标签与标题同名时,tagIds发挥作用
       for (const r of tagRows) { addLink(r[0], r[1]); tagIds.add(String(r[1])); }
     }
 
-    // 用标签边把 tag 类型的节点标出来 —— 这是唯一可靠的判据。
-    // 光看标题分不出「标签」和「恰好叫这个名字的页面」。
+    // 标记 tag 类型
     for (const nd of nodes) {
       if (tagIds.has(nd.id)) nd.kind = 'tag';
     }
@@ -254,9 +198,7 @@
       if (parRows) for (const r of parRows) addLink(r[0], r[1]);
     }
 
-    // 兜底黑名单的落地：只剔除【没有任何连边】的同名节点。
-    // 加这个限制是因为黑名单是按名字匹配的 —— 万一用户真有一个叫
-    // "State" 或 "include" 的页面且它有链接，那它就是内容，不能删。
+    // 节点黑名单处理
     if (nameBlocklist.size) {
       const linked = new Set();
       for (const l of links) { linked.add(l.source); linked.add(l.target); }
@@ -274,10 +216,7 @@
       filterStats.push(`名字黑名单剔除 ${removed} 个零度节点` + (removed ? ` [${hit.join(', ')}]` : ''));
     }
 
-    // DB 还没就绪时，上面那十几条查询会全军覆没、节点数为 0。那种情况下
-    // "0 节点"是【可重试】的瞬时状态，不是"这个图谱真的是空的" —— 但这一层
-    // 分不出来，所以它只负责把事实说清楚；重试由 index.js 的预热退避去做
-    // （退避跑完仍为空就停手，不会对着一个真·空图谱无限查库）。
+    // 日志
     if (queryFailCount > 0 && nodes.length === 0) {
       console.warn(`[GFI] 取数全部失败（${queryFailCount} 条查询）—— DB 可能还没就绪`
         + `；首条错因：${queryFirstError}`);
@@ -285,7 +224,6 @@
       console.warn(`[GFI] 有 ${queryFailCount} 条查询失败，但取到了 ${nodes.length} 个节点（部分过滤条件未生效）`
         + `；首条错因：${queryFirstError}`);
     }
-
     const withTs = nodes.reduce((c, n) => c + (n.createdAt ? 1 : 0), 0);
     console.log(
       `[GFI] 数据源：${nodes.length} 节点 / ${links.length} 边  ` +
@@ -296,9 +234,7 @@
     return { nodes, links };
   }
 
-  // =========================================================================
-  // Demo 生成器 —— 让渲染器/物理/特效可以在真实数据就绪前就测起来
-  // =========================================================================
+  // Demo 生成器
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
@@ -310,7 +246,7 @@
   }
 
   /**
-   * 合成一个带簇结构、度数长尾、时间戳跨度的图谱。
+   * 合成图谱。
    * @param {number} count 节点数
    * @param {object} [o] { clusters, seed, spanDays, withTimestamps }
    */
@@ -343,10 +279,9 @@
       const members = [];
       for (let k = 0; k < perCluster && nodes.length < count; k++) {
         const id = `c${c}-n${k}`;
-        // ~10% 的节点不给时间戳 —— 真实图谱里也有这种页面，
-        // 而且是 NaN 可见性路径（无时间戳 = 永远可见）唯一的验证来源
+        // 10% 的节点时间戳为NaN
         const createdAt = (withTs && rnd() > 0.1)
-          ? now - spanDays * 86400000 * Math.pow(rnd(), 0.6)     // 越新越多
+          ? now - spanDays * 86400000 * Math.pow(rnd(), 0.6)     
           : undefined;
         nodes.push({
           id, dbId: nodes.length + 1,
@@ -355,7 +290,6 @@
           createdAt,
         });
         members.push(id);
-        // 每个成员连 hub
         if (rnd() < 0.85) links.push({ source: id, target: hub });
         // 簇内互连
         if (members.length > 1 && rnd() < 0.4) {
@@ -364,7 +298,7 @@
       }
     }
 
-    // 少量跨簇长边 —— 这是图谱"结构感"的来源
+    // 少量跨簇长边
     const crossCount = Math.max(2, Math.round(clusters * 0.7));
     for (let i = 0; i < crossCount; i++) {
       const a = hubs[(rnd() * clusters) | 0];
@@ -375,26 +309,11 @@
     return { nodes, links };
   }
 
-  // =========================================================================
   // 统一入口
-  // =========================================================================
-  //
-  // 并发去重：相同请求在飞行中时复用同一个 Promise。
-  //
-  // ⚠ 为什么需要（实机日志暴露）：预热与"打开图谱"会几乎同时各查一次库 ——
-  //     预热启动（就绪后）→ 查库 438ms
-  //     图谱打开            → 又查一次 314ms        ← 同一份 68 节点，查了两遍
-  //   两次的结果完全一样，但每次都打一遍"数据源：68 节点 / 89 边"与过滤明细，
-  //   白白多花几百毫秒与一份内存。
-  //
-  //   这里刻意**不做结果缓存**（只做同飞行去重）：图谱在"刚编辑过"的时候重开，
-  //   本来就该拿到新数据，长期缓存会画出过期的图。飞行中的那次合并是安全的 ——
-  //   两个调用方要的是同一时刻的同一份数据。
-  //
-  // ⚠ 失败也要清掉记录，否则一次查询失败会让后续所有请求都复用那个失败的 Promise。
+  // 并发去重：相同请求在飞行中时复用同一个 Promise
+  // 节省一次预热数据
   let inflight = null;
   let inflightKey = '';
-
   /**
    * @param {object} o { source: 'logseq'|'demo', demoCount, includeParentLinks }
    */
@@ -402,9 +321,10 @@
     o = o || {};
     if (o.source === 'demo' || !LS()) return Promise.resolve(demo(o.demoCount || 400, o));
 
+    // 每次请求生成特殊密钥
     const key = String(o.source || 'logseq') + '|' + (o.demoCount || 400) + '|' + (o.includeParentLinks ? 1 : 0);
     if (inflight && inflightKey === key) {
-      console.log('[GFI] 数据请求合并（同一份请求正在飞行中）');
+      console.log('[GFI] 数据请求合并');
       return inflight;
     }
 
@@ -412,7 +332,7 @@
       try {
         return await fromLogseq(o);
       } catch (e) {
-        console.error('[GFI] 拉取真实数据失败，退回 demo：', e);
+        console.error('[GFI] 拉取真实数据失败', e);
         return demo(o.demoCount || 400, o);
       }
     })();
