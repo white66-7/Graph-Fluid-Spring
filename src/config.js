@@ -6,33 +6,14 @@
   const defaults = {
     // 物理
     physics: {
-      // 🌟 -0.12（原 -0.10）：配合 collidePad 一起把团簇之间推开 —— 实测
-      //   500 节点最近邻间距变异系数 CV 0.888 → 0.379（探针 test/uniformity-probe.js）。
-      charge: -0.12,          // 整体疏密。绝对值×1.5 更空灵，×0.6 更结团
-      chargeFalloff: 0,
-      chargeDegGain: 0.5,     // 斥力随度数增长：×(1 + gain·√deg)
-      chargeDegCap: 8,        // 上述倍率的上限
-      distanceMin: 16,        // 软化近距奇点（配合增大后的节点半径）
+      charge: -0.12,          // 整体疏密
+      chargeFalloff: 0,       // 
+      chargeDegGain: 0.5,     // 斥力随度数增长
+      chargeDegCap: 8,        // 倍率上限
+      distanceMin: 16,        // 软化近距奇点
       distanceMax: 420,       // 斥力截断半径
-      // 🌟 Obsidian 黄金比例连线距离：相连节点间距约 30~34 屏幕像素。
-      // 原来比纯节点比例大了一档（45 → 50），理由是"名字画在节点右侧、水平方向
-      // 要多留标签空间"。⚠ 标签现已改到节点【正下方】（见 renderer.drawOne），
-      // 那条理由不再成立 —— 但数值没动：改它会直接改变整套观感，要动请先在
-      // test/label-occlusion-probe.js 与 uniformity-probe.js 上量一遍。
       linkDistance: 50,
       linkStrength: 0.3,      // 边刚度
-      // 🌟 0.60（原 0.80）—— 照抄 Obsidian 实测值。
-      //
-      //   实测来源：obsidian.asar!/sim.js —— JS 回退路径里每个 tick 是
-      //     `t.x += t.vx *= .6`，WASM 快路径的 `n.complete(0, n, .6)` 也是同一个数。
-      //   即 d3 的 velocityDecay = 0.4（d3 默认 0.6，Obsidian 特意调小了保留率）。
-      //
-      //   对账实测（300 节点 × 3 种子，见 test/physics-sweep-probe.js）：
-      //     retain 0.80 → p50/LD 1.53、间距 CV 0.526、尾段抖动 0.823
-      //     retain 0.60 → p50/LD 1.50、间距 CV 0.521、尾段抖动 0.395
-      //   布局质量分毫未失，而【收敛尾段的残余抖动直接腰斩】——
-      //   这正是"整张图一直在动、停不下来"的来源（惯性减半 ⇒ 余振更快耗尽）。
-      //   ⚠ 也不是越小越好：阻尼越大力越"重"，松手后的滑行感会消失。
       velocityRetain: 0.60,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
       collideStrength: 1.0,   // 重叠消解强度（1 = d3 forceCollide 约定：每遍完全解消）
@@ -41,7 +22,7 @@
       //   的压力会把节点一路压到【接触距离】才停（实测最近邻 p10 = 13.6 ≈
       //   两片叶子半径之和 6.8+6.8），表现就是整团挤成一坨。
       //   探针实测：pad 6 → CV 0.549、间距 25.6/26.3/41.6（p10/p50/p90）。
-      collidePad: 6,
+      collidePad: 10,
       skipIsolatedCharge: true,
       // 🌟 2（原 3）：向心压缩减 1/3。gravity 是唯一把图谱往一起收的力，
       //   减弱它 = 团簇之间松开 = 分布更均匀。
@@ -188,8 +169,7 @@
       maxZoom: 6,
       zoomBase: 1.0012,
       fitPadding: 72,
-      // 沉降后那一次自动适配视野的缓动时长。瞬变会让整个画面"啪"地跳一下 ——
-      // 从种子布局到沉降完的图谱，包围盒能差 40% 以上，那一下很明显。
+      // 沉降后自动适配视野的缓动时长
       fitAnimMs: 320,
     },
 
@@ -198,9 +178,7 @@
       maxDpr: 2,
       bgFallback: '#0d0f14',
       bgCssVar: '--ls-primary-background-color',
-
-      // 🌟 Obsidian 风格节点尺寸：叶子节点直径约 6~7px，核心 hub 直径约 14~20px，
-      // 摆脱原有 1px 尘埃质感，呈现出星图般的晶莹实体感。
+      // 叶子节点直径 6~7px，核心 hub 直径 14~20px，
       radiusBase: 5.0,
       radiusScale: 1.8,
       radiusMin: 4.0,
@@ -210,9 +188,9 @@
       glowRadiusBuckets: [5, 7, 10, 14, 18, 24],
       glowSpread: 1.8,
 
-      // 🌟 Obsidian 风格连线：半透明纤细星轨（0.38 alpha），让节点成为视觉主角；
-      // hover 时高亮爆发（0.95 alpha），背景自动压暗（0.12 alpha）。
+      // 半透明纤细星轨（0.38 alpha）
       edgeColor: 'rgba(180,200,230,0.38)',
+      // hover 时高亮爆发0.95 alpha，背景压暗0.12 alpha
       edgeColorDim: 'rgba(180,200,230,0.12)',
       edgeColorHi: 'rgba(160,200,255,0.95)',
       edgeWidthMin: 0.8,
@@ -220,35 +198,14 @@
       edgeWidthBase: 0.7,
       edgeWidthSlope: 0.4,
 
-      // 🌟 Obsidian 行为：名字在几乎所有缩放级别都显示（只在互相重叠时让位），
-      // 所以显示阈值压得很低（fitK 的 35%）。
       labelShowScaleRatio: 0.35,
       labelHideScaleRatio: 0.28,
       labelFallbackShow: 0.20,
       labelFallbackHide: 0.16,
-      // 🌟 标签重叠让位。【false = Obsidian 的真实做法】。
-      //
-      //   查证：Obsidian 官方论坛 Bug graveyard 帖「Graph view - titles overlap」
-      //   （2022-10 归档 = 不会修）里，开发者 Silver 的原话是「我们没有任何计划
-      //   修复这个，因为对文字标签做碰撞检测在技术上并不简单。想读文字就放大；
-      //   只想看节点位置就缩小，文字会消失」。
-      //   其物理引擎（d3-force 复刻）的 forceCollide 也只按【节点半径】算，标签
-      //   完全不参与布局 —— 所以 Obsidian 的取舍手段【只有】按缩放的文字淡变。
-      //
-      //   true  = 重叠的标签互相让位（本插件早先的做法）。实测代价：视口内 299 个
-      //           节点只有 52 个拿到名字，而让位只压掉 7 个、其余是真的放不下 ——
-      //           即「很多节点没名字」是这套机制的必然结果，不是 bug。
-      //   false = 每个节点都画名字、允许重叠，密度完全交给缩放门槛（见
-      //           labelShowScaleRatio / labelHideScaleRatio）—— 与 Obsidian 一致。
+      // 标签重叠让位
       labelYield: false,
-      // 🌟 与已画出的标签重叠时，alpha 压到这个倍率（不是藏起来）。
-      //
-      //   实机截图反馈「标签重叠易混淆」—— 全是同亮度的字叠在一起没法看。
-      //   让位（藏起来）会丢名字，全画（等亮度）会糊，这是中间档：
-      //   先画的高名次节点（hub）保持清晰，被压住的退到背景，名字一个不少。
-      //   0 = 完全不画重叠的（等价于让位）；1 = 不做任何区分（全都同亮）。
       labelOverlapDim: 0.35,
-      // 🌟 Obsidian 从不截断名字。0 = 不截断；设成正数则超过该字数加「…」。
+      // 0为不截断,设成正数则超过该字数后续 …
       labelMaxChars: 0,
       labelFont: '12px ui-sans-serif, -apple-system, "Segoe UI", sans-serif',
       labelColor: '#d9e2f0',
@@ -257,18 +214,12 @@
       labelHaloColor: 'rgba(8,10,14,0.7)',
       labelHaloWidth: 1.5,
       labelAlpha: 0.8,
-      // 🌟 日记节点默认【不显示名字标签】—— 日期圆点安静地待在图上（Obsidian 式）。
-      // 节点本身仍在图上、仍参与力场；悬浮时邻域标签不受此开关影响
-      // （想看某颗绿点是哪天，hover 一下就行）。
+      // 日记节点默认不显示名字标签
       labelJournal: false,
-      // 🌟 Obsidian：所有节点都是名字候选（1.0），密集处的取舍完全交给
-      // 占位让位（重叠的藏起来），而不是按度数砍掉 70%。
       labelMaxRatio: 1.0,
-      // 占位格边长（CSS px）。占位按标签的【整个包围盒】标记，不再只标落点一格，
-      // 所以这个值只决定重叠判定的精细度：调小 = 判定更严、留下的标签更少。
+      // 占位格边长
       labelCell: 14,
-      // 标签精灵缓存上限。⚠ 必须【大于最高的 labelCap】（L0 = 800），否则单帧
-      // 就要建比上限更多的精灵，缓存会退化成每帧重建。
+      // 标签精灵缓存上限
       labelCacheMax: 1000,
 
       hoverScale: 1.35,

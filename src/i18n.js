@@ -5,11 +5,6 @@
  *   GFI.i18n.schema(entries)                      // 生成 Logseq 设置面板 schema
  *   GFI.i18n.t({ zh:'中文', en:'English' }, 'zh') // 取某一语言的一条文案
  *   GFI.i18n.relabelPanel()                       // 就地改写已渲染的面板文案
- *
- * ── 为什么单独一个模块 ──
- * config.js 已经 700 多行，而文案是纯数据、跟配置结构无关；更要紧的是要能被
- * 【单独测试】（test/headless-sim.js 直接断言两套文案键名一致、没有漏翻的条目）。
- *
  * ── 语言值怎么持久化 ──
  * 走 `logseq.updateSettings({ language })`（见 config.js 的 onFreshSettings 写入
  * 与 syncSettings 的读取）。normalize() 同时接受字符串与 enum 的索引形态 ——
@@ -36,14 +31,6 @@
     return cb[L] !== undefined ? cb[L] : (cb.zh !== undefined ? cb.zh : '');
   }
 
-  // 语言值的归一化。
-  //
-  // ⚠ 必须同时吃下【字符串】和【索引】两种形态。
-  //   我们的 enumChoices 是 ['中文', 'English']，Logseq 的 enum 控件理论上
-  //   会把选中的那个字符串写回设置；但实机反馈「上次选了英文，这次进去还是中文」——
-  //   最可能就是它写回的是**索引** 0/1（或者 '0'/'1'）。收到 1 时如果按字符串
-  //   比较就会落进默认值 zh，表现正是"选了英文、下次还是中文"。
-  //   所以这里显式处理：索引 → LANGS 顺序（LANGS = ['zh','en']，与 enumChoices 对齐）。
   function normalize(v) {
     if (typeof v === 'number' && Number.isFinite(v)) {
       return LANGS[v] || DEFAULT_LANG;
@@ -61,19 +48,7 @@
   function set(v) { lang = normalize(v); return lang; }
   function get() { return lang; }
 
-  /**
-   * schema 条目表。**key 与顺序就是设置面板的顺序**。
-   * 每条的 title / description 都是 { zh, en }；其它字段（type/default/input）原样透传。
-   *
-   * ⚠ 顺序不是随便排的：
-   *   1. `language` 必须第一条 —— 用户第一眼要做的选择
-   *   2. 过滤/布局/显示这类【常用】项放前面
-   *   3. 用户明确要求把 7 个"手感数值"（velocityRetain / settleTicks / linkBoost /
-   *      releaseAlpha / popAmp / popZeta / shockMagnitude）放到【最后】
-   *       —— 它们是调参项，平时不动
-   *   4. `useNativeGraph` 已按用户要求从面板删除（config 里的字段与
-   *      main.js 的原生模式回退逻辑仍保留，只是没有 UI 入口）
-   */
+
   const SCHEMA = [
     {
       key: 'language',
@@ -384,8 +359,6 @@
       const out = {};
       for (const k in e) {
         if (k === 'title') out.title = t(e.title);
-        // ⚠ 面板上用 short（1~2 行），实测依据那种长文案留给 DEVELOPMENT.md ——
-        //   描述越长面板越高，实测已到 scrollHeight 10572px 对 286px 视口。
         else if (k === 'description') out.description = t(e.short || e.description);
         else if (k === 'short') { /* 不直接进 schema */ }
         else out[k] = e[k];
@@ -394,7 +367,6 @@
     });
   }
 
-  /** 自检：两套语言的键名是否一致（漏翻检测）。返回不一致的条目列表。 */
   function audit(entries) {
     const src = entries || SCHEMA;
     const bad = [];
@@ -411,24 +383,8 @@
     return bad;
   }
 
-  // ---------------------------------------------------------------------------
-  // 就地改写设置面板文案（不用重载插件）
-  // ---------------------------------------------------------------------------
-  // 为什么需要：Logseq 的 `useSettingsSchema` 只在插件启动时被读一次，面板渲染
-  // 完就没有回调了。原先的结论是"改语言必须重载插件"，但用户实测「切了不生效」
-  // —— 靠重载既慢又容易让人以为坏了。面板就是普通 DOM，我们可以直接把文字换掉。
-  //
-  // ⚠ 匹配策略刻意【不依赖 Logseq 的类名】：那是内部实现，版本一变就废。
-  //   改成"按文字内容反查"—— 把我们两个语言的 title/description 归一化成候选表，
-  //   谁的文字命中，就把它换成当前语言的版本。
-  //   · 归一化只把连续空白压成一个空格（描述里的 \n 渲染出来就是空白）
-  //   · 只改【叶子】元素（内部没有元素子节点），避免把一个容器的整段内容冲掉
-  //   · 只在疑似设置面板的子树里动手，绝不碰图谱或正文
-  //   返回真正改写的条数 —— 0 就意味着面板结构变了，得重新看 DOM。
-
   const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 
-  /** 该元素是否在疑似"设置面板"的子树里（往上找带 settings/plugin 的 class/id） */
   function inSettingsPanel(el) {
     let d = el, n = 0;
     while (d && n++ < 8) {
@@ -439,16 +395,7 @@
     return false;
   }
 
-  /**
-   * 这个元素里有没有"交互控件"（输入框 / 单选 / 按钮 / 下拉 / 文本域 / option）。
-   *
-   * ⚠⚠ 这是修「点了中英文之后可选框没了」的那道保险。
-   *   事故经过：`relabelPanel` 靠"整体文本匹配"改写，而某个**容器**的整段文本
-   *   恰好等于我们的某条文案时，`el.textContent = target` 会把容器里的
-   *   `<input type=radio>` + `<label>` 一起换成一个纯文本节点 —— **UI 直接被抹掉**。
-   *   所以：只要元素内部（含自身）有控件，一律不碰。
-   *   Logseq 的 enum 用 radio 渲染，正好命中这条。
-   */
+
   function hasInteractive(el) {
     try {
       const tag = String(el.tagName || '').toLowerCase();
@@ -483,13 +430,7 @@
       }
     }
 
-    // ⚠ 两道安全闸门，都不能省：
-    //   ① 跳过我们自己注入的容器（__gfiSkip）
-    //   ② 跳过任何含交互控件的元素 —— 否则会把 enum 的单选框抹掉（踩过）
-    //   除此之外【不跳过含行内元素的节点】：Logseq 会把描述里的 **粗体** /
-    //   `代码` 渲染成 <strong>/<code>，跳过它们就会漏改（用户报过
-    //   「某些简介不切换」）。整体文本能命中就整体替换 —— 目标是纯文本，
-    //   富文本片段一并去掉，这是刻意的取舍。
+    // 两道安全闸门
     let hits = 0;
     let scanned = 0;
     let skippedControls = 0;
@@ -506,29 +447,17 @@
       const cur = norm(el.textContent);
       const target = map.get(cur);
       if (target === undefined) {
-        // 收集"看起来像我们的文案但没匹配上"的候选，便于 debug
         if (debug && cur.length > 8) missed.push(cur.slice(0, 60));
         continue;
       }
-      if (target === cur) continue;               // 已经是目标语言
+      // 目标语言
+      if (target === cur) continue;               
 
-      // ⚠ 目标文案是【纯文本】，所以直接整体替换元素内容：
-      //   把 textContent 写成目标值 —— 浏览器会把所有子节点（文本 + <strong>/<code>）
-      //   一并换成单个文本节点。
-      //
-      //   为什么不能只写"第一个文本节点"：
-      //     · 元素内部只有 <strong>/<code>（没有裸文本）时，根本没有文本节点可写 ——
-      //       那时若新建一个文本节点插进去，**旧的元素子节点还在**，新旧文案会叠在
-      //       一起（实测得到 "Pop damping ratio….弹出阻尼比…" 这种拼接结果）。
-      //     · 描述里的粗体/代码片段本来就是装饰，留不保留都不影响可读性，
-      //       而"能切换语言"明显更重要。
-      //   用 innerHTML = '' + 文本节点的话在真实 DOM 里安全（内容来自我们自己的
-      //   文案表，不含 HTML），但 textContent 更直白、也不依赖任何解析。
       try {
         el.textContent = target;
         hits++;
       } catch (e) {
-        // 极少数只读节点会拒绝写入，跳过即可，别让整轮改写中断
+        // 即可极少数拒绝写入节点
       }
     }
     GFI.__relabelStat = { scanned, hits, skippedControls };

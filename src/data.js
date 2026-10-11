@@ -1,12 +1,4 @@
-/*
- * 原始数据到定型数组 (SoA) + CSR 邻接
- * 一切数组只在 build() 时分配一次，之后整个生命周期零分配。
- * 热循环里不允许出现对象字面量、闭包、forEach。
- *
- * 关键技巧：createdAt 缺失存 NaN。
- *   可见性判定退化为单次比较  !(createdAt[i] > cutoff)
- *   NaN > cutoff 恒为 false → 无时间戳的节点永远可见，无需存在性分支。
- */
+/* 原始数据转换SoA + CSR 邻接 */
 (function (GFI) {
   'use strict';
   if (GFI.Data) return;
@@ -28,10 +20,11 @@
   // 黄金角螺旋节点初始位置
   function seedPositions(data) {
     const { n, x, y, deg } = data;
+    //  2.39996弧度即137.5°
     const golden = Math.PI * (3 - Math.sqrt(5));
     const spacing = 26;
     for (let i = 0; i < n; i++) {
-      // 度数高的节点放内圈，视觉上先立起骨架
+      // 度数高的节点放内圈
       const t = i + 0.5;
       const r = spacing * Math.sqrt(t);
       const a = t * golden;
@@ -49,9 +42,8 @@
   /**
    * @param {Array<{id,label,kind,createdAt?,color?,degree?}>} rawNodes
    * @param {Array<{source,target,label?}>} rawLinks
-   * @param {object} [prev] 上一次的 GraphData —— 存活 id 的位置会被继承，
-   *                        这样数据重载时图谱不会整个跳回随机位置
-   * @param {Map<string,{x:number,y:number}>} [layout] 预热布局（见 applyLayout）。
+   * @param {object} [prev] 上一次的 GraphData 
+   * @param {Map<string,{x:number,y:number}>} [layout] 预热布局
    *        给了就在种子布局之后整体覆盖，并把命中数挂在 D.adopted 上。
    */
   function build(rawNodes, rawLinks, prev, layout) {
@@ -61,7 +53,7 @@
     const cfg = GFI.config.physics;
     const rcfg = GFI.config.render;
 
-    // ---- 索引 id 并丢弃重复 / 非法 ----
+    // 丢弃重复与非法节点 
     const indexById = new Map();
     const nodes = [];
     for (let i = 0; i < rawNodes.length; i++) {
@@ -70,12 +62,15 @@
       if (!nd || nd.id === undefined || nd.id === null) continue;
       const id = String(nd.id);
       if (indexById.has(id)) continue;
+      // 给每个节点编号
+
       indexById.set(id, nodes.length);
+
       nodes.push(nd);
     }
     const n = nodes.length;
 
-    // ---- 只保留两端都存在的边 ----
+    // 只保留两端都存在的边 
     const links = [];
     const seenEdge = new Set();
     for (let i = 0; i < rawLinks.length; i++) {
@@ -84,31 +79,43 @@
       const s = indexById.get(String(lk.source));
       const t = indexById.get(String(lk.target));
       if (s === undefined || t === undefined || s === t) continue;
+      // 0x100000是2^20
       const key = s < t ? s * 0x100000 + t : t * 0x100000 + s;
-      if (seenEdge.has(key)) continue;   // 去重：无向图，同一对只留一条
+      if (seenEdge.has(key)) continue;   // 无向图去重
       seenEdge.add(key);
       links.push({ s, t });
     }
     const m = links.length;
 
-    // =====================================================================
-    // 分配
-    // =====================================================================
-    const D = {
-      n, m, nodes, links, indexById,
-      KIND, KIND_NAMES,
+    // 创建
+    const D = { 
+      n,  // 节点数
+      m,  // 边数
+      nodes, // 节点数组
+      links,  // 边数组
+      indexById, // ID到下标
+      KIND,  // 类
+      KIND_NAMES,  // 类名
 
-      // 输入派生，build 后不变
-      id: new Array(n),
+      // 节点 ID
+      id: new Array(n),  
+      // 节点标题
       label: new Array(n),
       kind: new Uint8Array(n),
       colorIdx: new Uint8Array(n),
-      colorTable: [],          // 固定调色板；渲染器按索引批量分组，避免每帧字符串比较
+      // 调色板
+      colorTable: [],         
+      // 度数-节点连了多少条边
       deg: new Uint16Array(n),
+      // 节点半径(随度数变大)
       radius: new Float32Array(n),
+      // 斥力强度
       charge: new Float32Array(n),
+      // 时间戳
       createdAt: new Float64Array(n),
+      // 标签优先级
       labelRank: new Uint8Array(n),
+      // CSR
       adjStart: new Uint32Array(n + 1),
       adjList: new Uint32Array(Math.max(1, m * 2)),
 
@@ -119,48 +126,58 @@
       vy: new Float32Array(n),
       ax: new Float32Array(n),
       ay: new Float32Array(n),
+      // 固定模式
       pinMode: new Uint8Array(n),
+      // 固定位置的坐标
       fx: new Float32Array(n),
       fy: new Float32Array(n),
+
       tx: new Float32Array(n),
       ty: new Float32Array(n),
+      // 受力权重
       simWeight: new Float32Array(n),
 
-      // 特效 / 渲染状态
-      // visible      = 当前是否绘制（淡出动画播完才置 0）
-      // wantVisible  = 按 cutoff 计算出的目标可见性（时间轴写的，特效读的）
-      // 两者分离是必须的：否则 cutoff 一过节点就消失，淡出动画根本没机会播。
+      // 实际可见性
       visible: new Uint8Array(n),
+      // 目标可见性
       wantVisible: new Uint8Array(n),
-      // 按类型（kind）的显示开关，5 个元素对应 KIND 枚举。全部默认开。
-      // 类型过滤走 wantVisible 这条既有通路，于是能白拿淡入淡出/弹出/重热一整套机制，
-      // 不用在渲染层另开一个"部分隐藏"的概念。
+      // 类型是否可见
       kindOn: new Uint8Array(5).fill(1),
+      // 渲染透明度
       renderAlpha: new Float32Array(n),
+      // 缩放倍率
       scaleMul: new Float32Array(n),
-      popT: new Float32Array(n),      // NaN = 未激活
+      // 出生动画进度
+      popT: new Float32Array(n),      
+      // 出生动画总长
       popDur: new Float32Array(n),
-      fadeT: new Float32Array(n),     // NaN = 未激活
+      // 淡出
+      fadeT: new Float32Array(n),    
       fadeFrom: new Float32Array(n),
 
       // 边
       lsrc: new Uint32Array(m),
       ltgt: new Uint32Array(m),
+      // 静止距离
       ldist: new Float32Array(m),
+      // 刚度
       lstr: new Float32Array(m),
       lvisible: new Uint8Array(m),
 
-      // 渲染暂存
-      hl: new Uint8Array(n),          // 0=压暗 1=邻接 2=自身
+      // hover 时高亮邻域
+      // 0=压暗 1=邻接 2=自身
+      hl: new Uint8Array(n),          
     };
 
-    // =====================================================================
+    // 后续分配
+
     // 调色板表
-    // =====================================================================
-    // 先放入 5 个 kind 色，之后允许少量自定义色，总量封顶。
-    // 超出后回退到 kind 色 —— 宁可颜色近似，也不能让渲染器的分桶数和精灵缓存爆炸。
     const MAX_COLORS = 12;
+
+    // 颜色值
     D.colorTable = PALETTE_ORDER.map((k) => rcfg.palette[k] || '#8a8f98');
+
+    // 根据颜色返回索引
     const colorKeyToIdx = new Map();
     for (let ci = 0; ci < D.colorTable.length; ci++) colorKeyToIdx.set(D.colorTable[ci], ci);
 
@@ -176,27 +193,27 @@
       return colorKeyToIdx.get(fallbackHex) !== undefined ? colorKeyToIdx.get(fallbackHex) : 0;
     }
 
-    // =====================================================================
-    // 逐节点填充
-    // =====================================================================
+    // 节点填充
     for (let i = 0; i < n; i++) {
       const nd = nodes[i];
       D.id[i] = String(nd.id);
       D.label[i] = nd.label == null ? '' : String(nd.label);
+
       D.kind[i] = kindToEnum(nd.kind);
 
-      // 调色板索引。渲染器按 colorIdx 分组批量 fill，所以颜色表必须很小 ——
-      // 若每页都有独立颜色，精灵缓存和分桶都会被撑爆。
+      // 调色板索引
       const pal = KIND_NAMES[D.kind[i]] || 'page';
       const kindHex = rcfg.palette[pal] || rcfg.palette.page;
       D.colorIdx[i] = colorIdxFor(nd.color ? String(nd.color) : kindHex, kindHex);
 
-      // createdAt：缺失 → NaN（见文件头说明）
+      // createdAt缺失则NaN
       const ca = nd.createdAt != null ? Number(nd.createdAt) : (nd['block/created-at'] != null ? Number(nd['block/created-at']) : NaN);
       D.createdAt[i] = Number.isFinite(ca) ? ca : NaN;
 
       D.visible[i] = 1;
+
       D.renderAlpha[i] = 1;
+
       D.scaleMul[i] = 1;
       D.simWeight[i] = 1;
       D.popT[i] = NaN;
@@ -205,13 +222,13 @@
       D.hl[i] = 1;
     }
 
-    // =====================================================================
-    // 度数 + CSR 邻接
-    // =====================================================================
+
+    // 度数
     for (let e = 0; e < m; e++) {
       D.deg[links[e].s]++;
       D.deg[links[e].t]++;
     }
+
     // 前缀和
     let acc = 0;
     for (let i = 0; i < n; i++) {
@@ -219,7 +236,6 @@
       acc += D.deg[i];
     }
     D.adjStart[n] = acc;
-    // scatter（用一份游标副本）
     const cursor = D.adjStart.slice(0, n);
     for (let e = 0; e < m; e++) {
       const { s, t } = links[e];
@@ -227,34 +243,32 @@
       D.adjList[cursor[t]++] = s;
     }
 
-    // =====================================================================
-    // 由度数派生：半径 / 斥力 / 标签优先级 / 边参数
-    // =====================================================================
+    // 由度数派生半径 / 斥力 / 标签优先级
     for (let i = 0; i < n; i++) {
       const d = D.deg[i];
       const sd = Math.sqrt(d);
 
-      // nodeSize 乘在【clamp 之后】—— 乘在里面的话 radiusMin/radiusMax 会把
-      // 倍率吃掉（缩小时永远被抬回 min，放大时永远被压回 max）。
-      D.radius[i] = clamp(rcfg.radiusBase + rcfg.radiusScale * sd, rcfg.radiusMin, rcfg.radiusMax)
-        * rcfg.nodeSize;
+      // 算圆直径
+      D.radius[i] = clamp(rcfg.radiusBase + rcfg.radiusScale * sd, rcfg.radiusMin, rcfg.radiusMax) * rcfg.nodeSize;
 
-      // 斥力随度数增长 —— 最"Obsidian"的一个参数：hubs 撑开空地，叶子保持紧密
-      const gain = 1 + cfg.chargeDegGain * sd;
+      // 斥力随度数增长
+      const gain = 1 + cfg.chargeDegGain * sd; 
+      // 斥力是负数,有上下限
       D.charge[i] = -Math.abs(cfg.charge) * Math.min(gain, cfg.chargeDegCap);
     }
 
-    // 标签优先级：按度数排名映射到 0..255（0 = 最优先显示）
-    // 绝不在每帧排序 —— 排序在 build 时做一次
+    // 标签优先级
     const order = new Uint32Array(n);
     for (let i = 0; i < n; i++) order[i] = i;
     const ordArr = Array.from(order);
+    // 度数不同时大的在前，相同时用a-b(下标)决定
     ordArr.sort((a, b) => (D.deg[b] - D.deg[a]) || (a - b));
     for (let r = 0; r < n; r++) {
+      // orrArr[r] 表示节点
       D.labelRank[ordArr[r]] = n > 1 ? Math.round((r / (n - 1)) * 255) : 0;
     }
 
-    // 边：长度按两端较小度数微调，强度按度数归一
+    // 长度按两端较小度数微调
     for (let e = 0; e < m; e++) {
       const { s, t } = links[e];
       const minDeg = Math.max(1, Math.min(D.deg[s], D.deg[t]));
@@ -267,6 +281,7 @@
 
     // 初始位置
     let inherited = 0;
+    // prev 是上次的D
     if (prev && prev.indexById && prev.indexById.size) {
       for (let i = 0; i < n; i++) {
         const pi = prev.indexById.get(D.id[i]);
@@ -283,7 +298,7 @@
     }
 
     if (inherited < n) {
-      // 新节点用螺旋种子补位，再叠加到已有质心上，避免新节点全挤在原点
+      // 新节点螺旋种子补位
       let cx = 0, cy = 0, cnt = 0;
       for (let i = 0; i < n; i++) {
         if (!isNaN(D.x[i])) { cx += D.x[i]; cy += D.y[i]; cnt++; }
@@ -302,32 +317,17 @@
       }
     }
 
-    // 预热布局必须【最后】覆盖，且只有它能把节点从种子螺旋里救出来
+    // 预热布局覆盖
     D.adopted = applyLayout(D, layout);
 
     return D;
   }
 
-  // -------------------------------------------------------------------------
-  // 预热布局落盘 —— 把预算好的坐标灌进刚 build 出来的 D
-  // -------------------------------------------------------------------------
+  // 把预算好的坐标灌进刚 build 出来的 D
   /**
-   * 用途：图谱视图打开的第一帧就显示【已经沉降完】的布局，而不是种子螺旋，
-   * 这样就不需要「先看到种子布局 → 几百毫秒后再缓动适配一次」这个中间态。
-   * 预算方见 src/warm.js（分帧跑同一个 Physics 到 alpha 睡着）。
-   *
-   * ⚠ 必须在 build() 【之后】调用：x/y 是 build 里分配的定型数组，而
-   *   this.nodes / indexById 也只有在 build 里才建好。build 会照常做一遍
-   *   螺旋种子 + 质心叠加（新节点仍然落在已有质心上），这里再把命中缓存的
-   *   节点坐标整体覆盖掉 —— 两条路径不会打架，因为覆盖发生在最后。
-   *
-   * ⚠ 速度必须清零。缓存里的坐标是「睡着时」的坐标，但用户可能在同一进程里
-   *   已经拖过节点 / 播过时间轴，D.vx / D.vy 会带着上一轮的值。不清的话，
-   *   第一帧就带着残余速度起步，布局会自己抖一下 —— 正好毁掉"一步到位"。
-   *
    * @param {object} D build() 的产物
    * @param {Map<string, {x:number,y:number}>} layout 节点 id → 坐标
-   * @returns {number} 真正套用到的节点数（0 = 一条都没命中，调用方应视为未命中）
+   * @returns {number} 
    */
   function applyLayout(D, layout) {
     if (!D || !layout || !layout.size || !D.n) return 0;
@@ -347,12 +347,8 @@
     return hit;
   }
 
-  // -------------------------------------------------------------------------
   // 时间轴过滤 —— 单次比较，O(n)，可直接在滑块拖动时每帧调用
-  // -------------------------------------------------------------------------
   /**
-   * 只写 wantVisible，【不碰 visible】。
-   * 实际切换交给 Timeline —— 它要在淡出动画播完之后才把 visible 置 0。
    * @returns {number} 目标状态发生变化的节点数
    */
   function applyCutoff(D, cutoff) {
@@ -361,14 +357,15 @@
     const kindOn = D.kindOn, kind = D.kind;
     let changed = 0;
     for (let i = 0; i < n; i++) {
-      // NaN > cutoff === false  →  无时间戳的节点永远可见
+      // NaN > cutoff === false
+      // 无时间戳的节点永远可见
       const w = (!(ts[i] > cutoff) && kindOn[kind[i]]) ? 1 : 0;
       if (w !== want[i]) { want[i] = w; changed++; }
     }
     return changed;
   }
 
-  // 边的可见性由两端派生，不存储（避免滑块拖动时还要维护 m 个状态）
+  // 边的可见性由两端生成
   function refreshEdgeVisibility(D) {
     const { m, lsrc, ltgt, lvisible, visible } = D;
     for (let e = 0; e < m; e++) {
@@ -377,6 +374,7 @@
   }
 
   // 包围盒算法
+  // 所有节点的最小外接矩形
   function bounds(D, onlyVisible) {
     const n = D.n;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -393,7 +391,7 @@
     return { minX, minY, maxX, maxY, empty: false };
   }
 
-  // 时间轴范围（ms epoch），从可见节点派生
+  // 时间轴范围，从可见节点派生
   function timeRange(D) {
     let min = Infinity, max = -Infinity, any = false;
     for (let i = 0; i < D.n; i++) {
@@ -419,7 +417,7 @@
     return out;
   }
 
-  // 调试 / 标定
+  // 调试
   function stats(D) {
     const { n, m, deg, lsrc, ltgt, x, y } = D;
     let degSum = 0, degMax = 0;

@@ -213,7 +213,7 @@
           removed++;
         }
       }
-      filterStats.push(`名字黑名单剔除 ${removed} 个零度节点` + (removed ? ` [${hit.join(', ')}]` : ''));
+      filterStats.push(`黑名单剔除 ${removed} 个节点` + (removed ? ` [${hit.join(', ')}]` : ''));
     }
 
     // 日志
@@ -221,13 +221,13 @@
       console.warn(`[GFI] 取数全部失败（${queryFailCount} 条查询）—— DB 可能还没就绪`
         + `；首条错因：${queryFirstError}`);
     } else if (queryFailCount > 0) {
-      console.warn(`[GFI] 有 ${queryFailCount} 条查询失败，但取到了 ${nodes.length} 个节点（部分过滤条件未生效）`
+      console.warn(`[GFI]${queryFailCount} 条查询失败，取到了 ${nodes.length} 个节点`
         + `；首条错因：${queryFirstError}`);
     }
     const withTs = nodes.reduce((c, n) => c + (n.createdAt ? 1 : 0), 0);
     console.log(
       `[GFI] 数据源：${nodes.length} 节点 / ${links.length} 边  ` +
-      `（${tagIds.size} 个标签，${withTs} 个带时间戳，共排除 ${excluded.size} 个内部实体）`
+      `（${tagIds.size} 个标签，${withTs} 个带时间戳，排除 ${excluded.size} 个内部实体）`
     );
     console.log('[GFI] 过滤明细：' + filterStats.join('  '));
 

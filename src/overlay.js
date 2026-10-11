@@ -2,9 +2,6 @@
 (function (GFI) {
   'use strict';
   if (GFI.Overlay) return;
-
-  const { clamp } = GFI.util;
-
   const STYLE_ID = 'gfi-overlay-styles';
 
   const CSS = `
@@ -301,7 +298,7 @@
 
       readBackground,
 
-      /** 画布上还没有内容时亮着它 —— 见 CSS 里 .gfi-loader 的说明 */
+      /** 画布上还没有内容时加载屏*/
       showLoader() { loader.hidden = false; },
       hideLoader() { loader.hidden = true; },
       get loaderVisible() { return !loader.hidden; },
@@ -320,10 +317,7 @@
         takeoverRoot = nativeVisible ? null : root;
         if (nativeVisible) resumeNativeRenderers();
         else pauseNativeRenderers();
-        // ---- 时序探针 ----
-        // 观感问题（"先看到原生图谱"）无法靠读代码定论 —— 它取决于宿主什么时候
-        // 把 #global-graph 交出来。所以每一次切换都留一条带时间戳的记录，
-        // 事后在控制台调 __GFI__.timeline() 就能看到客观顺序。
+        // 时序探针 
         record(nativeVisible ? '切回原生图谱' : '隐藏原生图谱（我们接管）');
       },
 
@@ -355,7 +349,7 @@
         delete root.__gfiMounted;
       },
 
-      /** 容器是否还活在 DOM 里。React 重渲染会把它清掉，而 root 仍然连着。 */
+      /** 容器是否活在 DOM  */
       get alive() {
         return !!(container && container.isConnected && canvas && canvas.isConnected);
       },
@@ -375,7 +369,7 @@
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
   }
 
-  /** 打印时序。返回数组，方便脚本化断言。 */
+  /** 打印时序 */
   function printEvents() {
     const lines = events.map((e) => `${String(e.t).padStart(6)}ms  ${e.label}${e.detail !== '' ? '  ' + e.detail : ''}`);
     console.log('%c[GFI] 进图谱时序\n' + lines.join('\n'), 'color:#0aa;font-family:monospace');
@@ -387,7 +381,7 @@
   const initialRoot = findRoot();
   record('overlay.js 加载', initialRoot ? '#global-graph 已在 DOM' : '#global-graph 还不在');
 
-  // 暴露给后加载的探针脚本：它拿到的 events 是同一个数组引用（实时）。
+  // 暴露给后加载的探针脚本
   const w = GFI.topWin;
   if (w) { w.__GFI_TIMELINE__ = { events, print: printEvents, clear: clearEvents }; }
 
@@ -407,8 +401,6 @@
     } catch (e) {}
   }
 
-  // 原生 Pixi Application 是什么时候被创建出来的 —— 这一条决定"原生图谱
-  // 到底有没有机会被看到"（它一旦 start()，画布上就有内容了）。
   // ---- 注册 __PIXI_APP_INIT__ 函数
   installPixiCapture();
   startRootWatch();

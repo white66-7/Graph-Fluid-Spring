@@ -76,7 +76,7 @@
       return false;
     }
 
-    // 用户自定义速率(节点/秒),设成0时套用 Obsidian公式
+    // 用户自定义速率(节点/秒),设成0时使用 Obsidian公式
     tl.pacedCount = pacedCount;
 
     const rawRate = Number(cfg.timeline.revealRate);
@@ -116,7 +116,6 @@
         Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * 0.5 * cfg.shock.maxRadiusFactor
       );
 
-      // 🌟 pulse() 返回是否真的发射了波（幅度可能被钳到 0）—— 只在真发射时重热
       const fired = fx.pulse({
         ox: o.x,
         oy: o.y,
@@ -127,7 +126,7 @@
       if (fired) sim.reheat(cfg.reheat.pulse);
     }
 
-    // 揭示锚点：Obsidian 母体细胞分裂计算
+    // Obsidian 母体细胞分裂计算
     function findParent(i) {
       const s = D.adjStart[i], e = D.adjStart[i + 1];
       let parentIdx = -1;

@@ -1,24 +1,7 @@
-/*
- * GFI.Physics — 力导向模拟
- * 配合二阶位置项：
- *     a = F(x)/m
- *     x' = x + v·dt + 0.5·a·dt²
- *     v' = (v + a·dt) · damp
- * 严格的 velocity Verlet 需要每 tick 求两次力（~2× 斥力开销）。在 dt=1/60、
- * damp≈0.94 时两者差异不可观测，不值得。
- * ── 关于 charge 的单位 ──
- * d3-force 的 forceManyBody 是【恒定幅值】斥力（vx += u·strength），不是库仑。
- * 我们用真正的 1/d²。为了让参数保持人类可读且与尺度无关，这里把 charge 定义为：
- *
- *     「在距离 = linkDistance 处的斥力加速度幅值」
- *
- * 即  a(d) = charge · (linkDistance / d)²
- * 等价于 K/d²，只是把 K 换成了一个直观的数。
- */
+/* GFI.Physics — 力导向模拟 */
 (function (GFI) {
   'use strict';
   if (GFI.Physics) return;
-
   const { clamp } = GFI.util;
 
   const PIN_NONE = 0;
@@ -28,23 +11,17 @@
     const n = D.n;
     const { x, y, vx, vy, ax, ay, deg, charge, simWeight, pinMode, fx, fy } = D;
 
-    // 网格：斥力用大格，碰撞用小格。
-    // 不能共用 —— 节点半径才 2~16，用 210 的格子做碰撞，扫到的格里几乎全是空的。
+    // 斥力大格，碰撞小格
     const chargeGrid = GFI.Spatial.create(cfg.distanceMax / 2);
     const collideGrid = GFI.Spatial.create(cfg.collideCell);
 
-    // 活动掩码：simWeight > 0 的节点参与一切力
     const activeMask = new Uint8Array(n);
 
-    // 碰撞搜索半径必须覆盖 r_i + r_j 的最大可能值，而它【不是】固定值：
-    // 半径随度数增长（render.radiusMax=14，再乘 nodeSize）。
-    // 原来这里写的是 collideCell*0.5 = 16 —— 两个高度数节点（r≈9.2）就要求
-    // 18.4 才不漏检，本来就偏小；render.nodeSize 一放大更是直接漏掉大半碰撞，
-    // 表现是节点叠在一起。这里按实际数据取上界，一次 O(n)，之后是常量。
+    // 碰撞搜索半径
     let maxNodeR = 0;
     for (let i = 0; i < n; i++) if (D.radius[i] > maxNodeR) maxNodeR = D.radius[i];
 
-    // 孤立节点的固定角向槽位（见 forceIsolatedRing）
+    // 孤立节点的固定角向槽位
     const isoSlot = new Int32Array(n).fill(-1);
     let isoCount = -1;
 
@@ -54,22 +31,20 @@
       alphaMin: cfg.alphaMin,
       alphaDecay: 1 - Math.pow(cfg.alphaMin, 1 / Math.max(1, cfg.settleTicks)),
       tickCount: 0,
-      asleep: false,
-      grid: chargeGrid,          // 命中测试 / 视口剔除复用这个
-      collideGrid,
-      activeMask,
-      lod: 1,
-      chargeSkip: 0,             // LOD：隔 tick 跑斥力的计数器
+      asleep: false,   // 是否停止
+      grid: chargeGrid,   // 斥力网格
+      collideGrid,       // 碰撞网格
+      activeMask,       // 活跃节点数组
+      lod: 1,           // 性能挡位
+      chargeSkip: 0,    // 斥力计数器
     };
-
-    // d3 的 fx==null 惯用法不能移植到定型数组（读 Float32Array 永远返回数字），
-    // 所以用独立的 pinMode 数组显式判断。
 
     function zeroForces() {
       ax.fill(0, 0, n);
       ay.fill(0, 0, n);
     }
 
+    // 活跃节点更新
     function updateActiveMask() {
       let active = 0;
       for (let i = 0; i < n; i++) {
@@ -80,9 +55,7 @@
       return active;
     }
 
-    // -----------------------------------------------------------------------
     // 引脚
-    // -----------------------------------------------------------------------
     function applyPins() {
       for (let i = 0; i < n; i++) {
         if (pinMode[i] === PIN_HARD) {
@@ -93,30 +66,12 @@
       }
     }
 
-    // -----------------------------------------------------------------------
-    // forceLink —— 弹簧，按度数分配两端权重
-    //
-    // 🌟 拖拽期间的【局部弹簧增益】（sim.setDragLinkBoost）。
-    //
-    // 为什么需要它：lstr[e] = clamp(linkStrength / minDeg, 0.02, 0.5)，即边的刚度
-    // 按两端较【低】度数衰减。而被拖的通常就是低度数叶子，它连到 hub 的边刚度只有
-    // 0.3/3 = 0.1，再乘 alpha 0.3 —— 邻居每 tick 只获得约 0.7wu 的加速度。
-    // 实测（test/drag-probe.js，拖 234wu）：邻居只跟出 91wu，关联边被拉伸到
-    // 379%，松手瞬间被拖节点离最近邻居 142wu（基线 26.4、平衡边长 50）——
-    // 图被扯裂，松手就是把这根橡皮筋收回来，怎么收都不舒服。
-    //
-    // 只增益【被拖节点自己关联的边】，不动别的边：实测 2~3 跳增益反而更差
-    // （局部造出一块硬斑对抗全局布局，全局撕裂均值 63% → 110%）。
-    //
-    // 用独立的两个标量而不是去改 D.lstr：D.lstr 在 Data.build 时烘焙，
-    // 若拖拽期间发生数据重建，写回旧值会污染新图。标量天然免疫。
-    // -----------------------------------------------------------------------
+
     let dragBoostNode = -1;
     let dragBoostFactor = 1;
-    // 被拖节点每个【直接邻居】的额外阻尼混合系数（0 = 用正常阻尼，1 = 用满阻尼）。
-    // 值 = 该邻居在增益边上实际拿到的力份额，见 integrate 里的说明。
     const dragBoostBlend = new Float32Array(n);
 
+    // 弹簧力
     function forceLink(a) {
       const { m, lsrc, ltgt, ldist, lstr, lvisible } = D;
       const boosting = dragBoostNode >= 0;
@@ -124,7 +79,6 @@
         if (!lvisible[e]) continue;
         const s = lsrc[e], t = ltgt[e];
         const ws = simWeight[s], wt = simWeight[t];
-        // 正在淡出的节点不能拖拽邻居
         if (ws === 0 || wt === 0) continue;
         if (pinMode[s] === PIN_HARD && pinMode[t] === PIN_HARD) continue;
 
@@ -135,7 +89,7 @@
 
         const ds = deg[s], dt = deg[t];
         const sum = ds + dt;
-        // 度数低的动得多，hub 几乎不动
+        // 度数分配力
         const biasT = sum > 0 ? ds / sum : 0.5;   // 作用在 t 上的权重
         const biasS = 1 - biasT;
 
@@ -148,15 +102,17 @@
       }
     }
 
-    // -----------------------------------------------------------------------
-    // forceManyBody —— 网格上的精确截断库仑 1/d²
-    // -----------------------------------------------------------------------
+    // 库仑力
     function forceManyBody(a, skipIsolated) {
       const R = cfg.distanceMax;
+      // 斥力截断半径
       const R2 = R * R;
+      // 距离比这个小的时候按这个算斥力
       const minD = cfg.distanceMin;
       const ld = cfg.linkDistance;
       const falloff = cfg.chargeFalloff | 0;
+
+      // 空间网格
       const cols = chargeGrid.cols, rows = chargeGrid.rows;
       if (!cols || !rows) return;
 
@@ -164,33 +120,13 @@
       const inv = chargeGrid.inv, gMinX = chargeGrid.minX, gMinY = chargeGrid.minY;
 
       for (let i = 0; i < n; i++) {
-        // ⚠ 这里【不能】因为 i 被固定就 continue —— 内层只处理 j > i 的那一对
-        //   （`if (j <= i) continue;`，每对只算一次、对称施加），所以跳掉外层 i
-        //   等于把整对 (i, j>i) 一起抹掉：两个方向的力都没了。
-        //   结果：被固定的节点对【高序号】邻居完全"斥力隐身"，对低序号邻居却正常
-        //   （那一对由低序号方作外层索引时被处理）。是序号相关的非对称。
-        //   表现：右键固定一个节点后，序号比它大的邻居会往它身上挤。
-        //
-        //   这与下面零度节点那条是同一类错误：守卫写在【外层循环】上，就会连带
-        //   抹掉成对的相互作用。被固定的节点不需要【接收】力（applyPins 每 tick
-        //   把它的坐标钉回去、速度清零），但必须照常【施加】力 —— 所以豁免只能
-        //   写在末尾的累加处，不能写在这里。
-        //   回归测试：test/headless-sim.js §17。
         if (!activeMask[i]) continue;
-        // skipIsolated 的含义是「孤立节点不扰动主干」，而不是「孤立节点之间不作用」。
-        // 早先整行跳掉零度节点，导致环上的孤立节点彼此完全不排斥、会叠在一起
-        // （实测最小角间隔只有 1.6°）。现在只跳过【跨组】配对。
         const isoI = deg[i] === 0;
 
         const xi = x[i], yi = y[i];
-        // 🌟 电荷按 simWeight 加权：新节点出生时 simWeight 从 0 渐入，
-        //   它的斥力也就跟着渐入，而不是落在邻居质心上就用满幅把人家顶开。
-        //   ⚠ 顺带补上一个既有的对称性缺口：淡出时 simWeight 已经在降，但之前
-        //     斥力只看二值的 activeMask —— 节点一直满强度排斥到最后一帧才突变。
         const swi = simWeight[i];
         const ci = Math.abs(charge[i]) * swi;
 
-        // 按节点精确位置算索引区间 —— 不做固定 NxN 扫描，避免 off-by-one 丢力
         let cx0 = ((xi - R - gMinX) * inv) | 0;
         let cy0 = ((yi - R - gMinY) * inv) | 0;
         let cx1 = ((xi + R - gMinX) * inv) | 0;
@@ -226,11 +162,6 @@
               const cj = Math.abs(charge[j]) * swj;
               const cAvg = (ci + cj) * 0.5;
 
-              // 三种力律，均匀背景下的净斥力（∫(K/r^p)·2πr·dr）：
-              //   p=0 恒定幅值 → 2πKρR²   有限（有 distanceMax 截断时）—— d3 / Logseq 的约定
-              //   p=1  K/d     → 2πKρR    有限 —— Fruchterman-Reingold 的 k²/d
-              //   p=2  K/d²    → 2πKρ·ln(R/r₀)  【对数发散】二维下图会一路膨胀
-              // 三维里 1/r² 的积分是有限的，二维不是 —— 这是二维力导向布局的经典陷阱。
               let mag;
               if (falloff === 0) {
                 mag = cAvg * a;                       // 恒定幅值
@@ -259,12 +190,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
-    // gravity —— 恒定幅值向心拉力（带死区）
-    // 这是真正约束图谱范围、塑造形状的力。
-    // 不用 -k·d 的线性弹簧：能把 5000 单位的图拉回来所需的刚度，
-    // 会让外围节点的加速度达到几百 wu/s²。
-    // -----------------------------------------------------------------------
+    // 向心力计算
     function forceGravity(a) {
       let cxm = 0, cym = 0, k = 0;
       for (let i = 0; i < n; i++) {
@@ -523,9 +449,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
     // 主 tick
-    // -----------------------------------------------------------------------
     const DT = GFI.DT;
 
     sim.tick = function tick(dt) {
@@ -537,14 +461,15 @@
       const active = updateActiveMask();
       if (active === 0) { sim.tickCount++; return; }
 
-
       const lodCfg = GFI.config.lod.levels[clamp(sim.lod, 0, GFI.config.lod.levels.length - 1) | 0];
 
       zeroForces();
+
       applyPins();
 
-      // 力都累加进 ax/ay（在当前 x 处求值）
+      // 算弹簧力
       forceLink(a);
+
 
       sim.chargeSkip = (sim.chargeSkip + 1) % Math.max(1, lodCfg.chargeEveryNth);
       if (sim.chargeSkip === 0) {
