@@ -241,18 +241,18 @@
         // 🌟 labelCap 大幅放宽（240→800 等）：Obsidian 的做法是【所有节点】都
         //   有名字，密集处靠重叠让位自动取舍 —— cap 只是防极端帧的首帧建精灵
         //   爆炸（800 张 ≈ 80ms 一次性成本），不是常规取舍手段。
-        { maxN: 800,  glow: 'all',      glowMinScale: 0,    labelCap: 800, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
-        { maxN: 2200, glow: 'deg2',     glowMinScale: 0,    labelCap: 600, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
+        { maxN: 800, glow: 'all', glowMinScale: 0, labelCap: 800, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
+        { maxN: 2200, glow: 'deg2', glowMinScale: 0, labelCap: 600, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
         // ⚠ 降档链必须【单调变便宜】。L2 原来写的是 glow:'all'，而 L1 是 'deg2' ——
         //   于是从 L1 降到 L2、且相机缩放 k ≥ glowMinScale 时，反而给全部叶子
         //   节点补上了辉光：在"因为太慢所以降档"的那一刻增加了绘制量。
         //   glow 是纯 fill-rate 开销（半尺寸 spread×rScreen 的 alpha 混合大位图），
         //   是这个渲染器最贵的一项，绝不能反向。
-        { maxN: 5000, glow: 'deg2',     glowMinScale: 0.5,  labelCap: 400, collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 1, pulses: true },
+        { maxN: 5000, glow: 'deg2', glowMinScale: 0.5, labelCap: 400, collideIter: 1, skipIsolatedCharge: true, chargeEveryNth: 1, pulses: true },
         // 🌟 L3 collideIter 0→1：碰撞参与「均匀分布」（配合 collidePad 保持间距），
         //   且它是位置修正不是力，只在醒着时跑，沉降后零成本。降档链仍单调变便宜：
         //   L3 相比 L2 还有 chargeEveryNth:2 / glow:'hover' / pulses:false / labelCap 200。
-        { maxN: Infinity, glow: 'hover', glowMinScale: 1,   labelCap: 200, collideIter: 1, skipIsolatedCharge: true,  chargeEveryNth: 2, pulses: false },
+        { maxN: Infinity, glow: 'hover', glowMinScale: 1, labelCap: 200, collideIter: 1, skipIsolatedCharge: true, chargeEveryNth: 2, pulses: false },
       ],
       sampleFrames: 30,
       downshiftMs: 15,
@@ -295,10 +295,10 @@
 
     // 数据层
     data: {
-      hideSystemJournal: false,
-      hideSystemPages: false,
-
       hideClassIdents: [
+        'logseq.class/Journal',
+        'logseq.class/Page',
+        'logseq.class/Code-block',
         'logseq.class/Tag',
         'logseq.class/Whiteboard',
         'logseq.class/Comments',
@@ -307,7 +307,7 @@
         'logseq.class/Template',
       ],
       hideNames: [
-        'card','Property','Comment','Card','Cards','Alias', 'Bidirectional property title', 'Contents', 'Due',
+        'card', 'Property', 'Comment', 'Card', 'Cards', 'Alias', 'Bidirectional property title', 'Contents', 'Due',
         'Enable bidirectional properties', 'Extends', 'External URL',
         'Hide from Node', 'Library', 'Published URL',
         'Repeating recur frequency', 'Repeating recur unit', 'Repeating type',
@@ -400,8 +400,7 @@
     labelJournal: () => GFI.configDefaults.render.labelJournal,
     labelYield: () => GFI.configDefaults.render.labelYield,
     nodeSize: () => GFI.configDefaults.render.nodeSize,
-    hideSystemJournal: () => GFI.configDefaults.data.hideSystemJournal,
-    hideSystemPages: () => GFI.configDefaults.data.hideSystemPages,
+    hideClassIdents: () => GFI.configDefaults.data.hideClassIdents.join(', '),
     hideNames: () => GFI.configDefaults.data.hideNames.join(', '),
     // 本轮新增：预热相关的三个旋钮
     prewarm: () => GFI.configDefaults.warm.enabled,
@@ -429,10 +428,7 @@
   GFI.SCHEMA_BINDINGS = SCHEMA_BINDINGS;
 
   // 日记标签默认关闭
-  // ⚠ 15：新增 language / prewarm / syncSettleMs / revealAnimMs 四个键。
-  //   CFG_VERSION 一变，syncSettings 会走 fresh 分支 —— 新键直接取默认值，
-  //   老存档里没有它们不会变成 undefined。
-  GFI.CFG_VERSION = 15;
+  GFI.CFG_VERSION = 16;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -448,8 +444,6 @@
     timelapseRate: (v) => v >= 0 && v <= 200,
     labelMaxRatio: (v) => v > 0 && v <= 1,
     nodeSize: (v) => v >= 0.5 && v <= 2.5,
-    // 预热相关（本轮新增）。⚠ 没有区间之前它们是"设多少就按多少"——
-    // 一个手抖的 999999 会让进图谱时同步阻塞十几秒。
     syncSettleMs: (v) => v >= 0 && v <= 5000,
     revealAnimMs: (v) => v >= 0 && v <= 2000,
   };
@@ -530,12 +524,6 @@
     c.render.labelYield = fresh ? d.render.labelYield : !!s.labelYield;
     c.render.nodeSize = pick('nodeSize', d.render.nodeSize);
 
-    // -----------------------------------------------------------------------
-    // 🌟 自定义 Journal、Page/Pages 系统节点显隐（默认不删）
-    // -----------------------------------------------------------------------
-    c.data.hideSystemJournal = fresh ? d.data.hideSystemJournal : !!s.hideSystemJournal;
-    c.data.hideSystemPages = fresh ? d.data.hideSystemPages : !!s.hideSystemPages;
-
     // 解析 hideNames
     let userNames = d.data.hideNames.slice();
     if (!fresh && s.hideNames !== undefined && s.hideNames !== null) {
@@ -551,25 +539,21 @@
 
     let classIdents = d.data.hideClassIdents.slice();
 
-    // 1. 处理 Journal：仅当用户明确开启开关时才删除，否则强制保留
-    if (c.data.hideSystemJournal) {
-      if (!classIdents.includes('logseq.class/Journal')) classIdents.push('logseq.class/Journal');
-      if (!userNames.includes('Journal')) userNames.push('Journal');
-    } else {
-      classIdents = classIdents.filter((x) => x !== 'logseq.class/Journal');
-      userNames = userNames.filter((x) => x.toLowerCase() !== 'journal');
+    // 解析 hideClassIdents
+    if (!fresh && s.hideClassIdents !== undefined && s.hideClassIdents !== null) {
+      let userClasses = [];
+      if (Array.isArray(s.hideClassIdents)) {
+        userClasses = s.hideClassIdents.map((x) => String(x).trim()).filter(Boolean);
+      } else if (typeof s.hideClassIdents === 'string') {
+        userClasses = s.hideClassIdents
+          .split(/[,\n]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+      }
+      for (const ident of userClasses) {
+        if (!classIdents.includes(ident)) classIdents.push(ident);
+      }
     }
-
-    // 2. 处理 Page/Pages：仅当用户明确开启开关时才删除，否则强制保留
-    if (c.data.hideSystemPages) {
-      if (!classIdents.includes('logseq.class/Page')) classIdents.push('logseq.class/Page');
-      if (!userNames.includes('Page')) userNames.push('Page');
-      if (!userNames.includes('Pages')) userNames.push('Pages');
-    } else {
-      classIdents = classIdents.filter((x) => x !== 'logseq.class/Page');
-      userNames = userNames.filter((x) => x.toLowerCase() !== 'page' && x.toLowerCase() !== 'pages');
-    }
-
     c.data.hideClassIdents = classIdents;
     c.data.hideNames = userNames;
 
@@ -591,11 +575,10 @@
           labelJournal: c.render.labelJournal,
           labelYield: c.render.labelYield,
           nodeSize: c.render.nodeSize,
-          hideSystemJournal: c.data.hideSystemJournal,
-          hideSystemPages: c.data.hideSystemPages,
+          hideClassIdents: c.data.hideClassIdents.join(', '),
           hideNames: c.data.hideNames.join(', '),
         });
-      } catch (e) {}
+      } catch (e) { }
     }
     return c;
   };

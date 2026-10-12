@@ -374,6 +374,7 @@
   }
 
   // 包围盒算法
+  // 相机,时间线等
   // 所有节点的最小外接矩形
   function bounds(D, onlyVisible) {
     const n = D.n;

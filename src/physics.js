@@ -13,6 +13,7 @@
 
     // 斥力大格，碰撞小格
     const chargeGrid = GFI.Spatial.create(cfg.distanceMax / 2);
+
     const collideGrid = GFI.Spatial.create(cfg.collideCell);
 
     const activeMask = new Uint8Array(n);
@@ -146,7 +147,7 @@
             const end = cellStart[c + 1];
             for (let p = cellStart[c]; p < end; p++) {
               const j = items[p];
-              if (j <= i) continue;                    // 只算一次，对称施加（避免重复计数）
+              if (j <=  i) continue;                    // 只算一次，对称施加
               if (!activeMask[j]) continue;
               // 跨组（孤立 ↔ 连通）配对跳过
               if (skipIsolated && (deg[j] === 0) !== isoI) continue;
@@ -218,10 +219,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
     // forceCenter —— 质心刚性回正
-    // ⚠ 不乘 alpha：它是整体平移，乘了会在低 alpha 时漂移
-    // -----------------------------------------------------------------------
     function forceCenter() {
       let sx = 0, sy = 0, k = 0;
       for (let i = 0; i < n; i++) {
@@ -235,7 +233,6 @@
       for (let i = 0; i < n; i++) { x[i] -= shiftX; y[i] -= shiftY; }
     }
 
-    // -----------------------------------------------------------------------
     // forceIsolatedRing —— 把零度节点锚在外圈环上
     //
     // 零度节点没有连边力，只受斥力和微弱重力，位置基本是随机的 ——
@@ -244,7 +241,6 @@
     // 用【持续拉力】把半径锚定到环上，而不是直接摆位置：
     // 这样它们仍然可拖拽、也能被激波推着走，只是会被缓慢拉回环上。
     // 刻意【不乘 alpha】：乘了的话模拟一沉降，力就消失，它们又飘回去了。
-    // -----------------------------------------------------------------------
     function forceIsolatedRing() {
       const rc = cfg.isolatedRing;
       if (!rc || !rc.enabled) return;
@@ -322,9 +318,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
     // 积分
-    // -----------------------------------------------------------------------
     function integrate(dt, damp) {
       const scale = dt / GFI.DT;
       // 🌟 被拖节点的邻居要【额外加阻尼】—— 否则拖 hub 时它们会以 ~11Hz 抽搐。
@@ -377,9 +371,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
     // forceCollide —— 位置修正（不是力）
-    // -----------------------------------------------------------------------
     function forceCollide(iterations) {
       if (iterations <= 0) return;
       const { radius } = D;
@@ -477,21 +469,19 @@
         forceManyBody(a, cfg.skipIsolatedCharge || lodCfg.skipIsolatedCharge);
       }
 
+      // 将所有节点拉向质心
       forceGravity(a);
+
+      // 孤立节点锚在外圈环上
       forceIsolatedRing();
 
-      // 阻尼：帧率无关。retain 是 60Hz 下的每 tick 保留率
+      // 阻尼
       const damp = Math.pow(cfg.velocityRetain, dt / DT);
 
+      // 用累加的力更新速度和位置
       integrate(dt, damp);
 
       // 碰撞需要自己的微网格 —— 节点位置刚变过，必须重建。
-      // ⚠ 这里【不能用 alpha 门控】（曾经写 a > 0.05 才跑，是个真 bug）：
-      //   alpha ∈ (alphaMin, 0.05) 的尾段里节点仍在被移动 —— isolatedRing 的拉力
-      //   刻意不乘 alpha（否则模拟一沉降孤立节点就飘回去），残余的弹簧力也还没
-      //   归零 —— 而碰撞停了，于是这段窗口里产生的重叠被【永久冻结】在最终布局
-      //   里，表现就是图上成对叠在一起的节点。碰撞是位置修正不是力，只要醒着
-      //   就必须每 tick 跑。
       if (lodCfg.collideIter > 0) {
         collideGrid.build(D, activeMask);
         forceCollide(lodCfg.collideIter);
@@ -502,9 +492,8 @@
       sim.tickCount++;
     };
 
-    // -----------------------------------------------------------------------
+
     // 控制 API
-    // -----------------------------------------------------------------------
     sim.reheat = function reheat(a) {
       if (a > sim.alpha) sim.alpha = a;
       sim.asleep = false;

@@ -17,17 +17,15 @@
   const LANGS = ['zh', 'en'];
   const DEFAULT_LANG = 'zh';
 
-  // ⚠ 这两个数组的【顺序必须一一对应】：索引 0 = 中文 = 'zh'，索引 1 = English = 'en'。
-  //   normalize() 靠这个映射把 enum 的索引翻译成语言代码。
+  // 映射
   const ENUM_CHOICES = ['中文', 'English'];
 
   let lang = DEFAULT_LANG;
 
-  /** 取一条文案。cb 形如 { zh:'…', en:'…' }；缺翻译时回落到 zh，再回落到键名本身。 */
   function t(cb, force) {
     const L = force || lang;
     if (cb === undefined || cb === null) return '';
-    if (typeof cb === 'string') return cb;          // 允许直接给字符串（不翻译）
+    if (typeof cb === 'string') return cb;          // 直接给字符串
     return cb[L] !== undefined ? cb[L] : (cb.zh !== undefined ? cb.zh : '');
   }
 
@@ -39,7 +37,7 @@
     if (s === '') return DEFAULT_LANG;
     if (s === '1' || s === 'en' || s === 'english' || s === 'en-us') return 'en';
     if (s === '0' || s === 'zh' || s === 'cn' || s === 'zh-cn' || s === 'chinese' || s === '中文') return 'zh';
-    // 兜底：直接按 enumChoices 的文案匹配（Logseq 可能把 label 原样写回）
+    // 兜底
     const idx = ENUM_CHOICES.findIndex((c) => String(c).trim().toLowerCase() === s);
     if (idx >= 0) return LANGS[idx] || DEFAULT_LANG;
     return DEFAULT_LANG;
@@ -50,322 +48,235 @@
 
 
   const SCHEMA = [
-    {
-      key: 'language',
-      type: 'enum',
-      enumChoices: ['中文', 'English'],
-      enumPicker: 'radio',
-      title: { zh: '🌐 界面语言 / Language', en: '🌐 界面语言 / Language' },
-      description: {
-        zh: '设置面板的语言。改完点【重新加载插件】生效；也可以在主窗口控制台运行 __GFI_LANG__("en") 就地切换。',
-        en: 'Language of this settings panel. Reload the plugin after changing; or run __GFI_LANG__("en") in the main-window console to switch in place.',
+      {
+        key: 'language',
+        type: 'enum',
+        enumChoices: ['中文', 'English'],
+        enumPicker: 'radio',
+        title: { zh: '界面语言 / Language', en: 'Language' },
+        short: {
+          zh: '面板语言',
+          en: 'Panel language',
+        },
+        default: '中文',
       },
-      short: {
-        zh: '面板语言。改完点【重新加载插件】生效；也可以直接运行 __GFI_LANG__("en") 就地切换。',
-        en: 'Panel language. Reload after changing; or run __GFI_LANG__("en") to switch in place.',
+      {
+        key: 'hideClassIdents',
+        type: 'string',
+        input: 'textarea',
+        title: { zh: '自定义过滤类', en: 'Custom Excluded Classes' },
+        short: {
+          zh: '默认隐藏 Code、Page、Journal 等无查询意义的节点。\n' +
+            '若想显示，请删除下方相关名称；\n' +
+            '若想隐藏系统类，请查阅 Logseq 相关文档；\n' +
+            '若想隐藏自定义类，请按照格式输入相关名称。',
+          en: 'By default hides meaningless query nodes such as Code, Page, Journal.\n' +
+            'To show them, delete the corresponding names below;\n' +
+            'To hide system classes, see the Logseq documentation;\n' +
+            'To hide custom classes, enter names in the format shown.',
+        },
+        default: '',
       },
-      default: '中文',
-    },
-    {
-      key: 'hideSystemJournal',
-      type: 'boolean',
-      title: { zh: '📅 删去 Journal 系统节点', en: '📅 Hide Journal System Node' },
-      description: {
-        zh: '是否从图谱中删去 Journal 系统节点（默认关：不删，保留展示）。',
-        en: 'Delete/hide the Journal system node from the graph? (default false: keep)',
+      {
+        key: 'hideNames',
+        type: 'string',
+        input: 'textarea',
+        title: { zh: '自定义过滤名称', en: 'Custom Excluded Names' },
+        short: {
+          zh: '节点显示黑名单',
+          en: 'Node display blacklist',
+        },
+        default: '',
       },
-      short: {
-        zh: "从图谱中删去 Journal 系统节点（默认关：保留）。",
-        en: "Remove the Journal system node from the graph (default: keep).",
+      {
+        key: 'charge',
+        type: 'number',
+        title: { zh: '斥力强度', en: 'Repulsion' },
+        short: {
+          zh: '节点之间的排斥力，决定整体疏密',
+          en: 'Repulsion between nodes; controls overall spread.',
+        },
+        default: -0.12,
       },
-      default: false,
-    },
-    {
-      key: 'hideSystemPages',
-      type: 'boolean',
-      title: { zh: '📄 删去 Page/Pages 系统节点', en: '📄 Hide Page/Pages System Node' },
-      description: {
-        zh: '是否从图谱中删去 Page / Pages 系统节点（默认关：不删，保留展示）。',
-        en: 'Delete/hide the Page/Pages system node from the graph? (default false: keep)',
+      {
+        key: 'linkDistance',
+        type: 'number',
+        title: { zh: '连线长度', en: 'Link Distance' },
+        short: {
+          zh: '相连节点间的静止距离',
+          en: 'Resting distance between connected nodes',
+        },
+        default: 50,
       },
-      short: {
-        zh: "从图谱中删去 Page / Pages 系统节点（默认关：保留）。",
-        en: "Remove the Page/Pages system node from the graph (default: keep).",
+      {
+        key: 'timelapseRate',
+        type: 'number',
+        title: { zh: '时间旅行节奏', en: 'Timelapse Rate' },
+        short: {
+          zh: '越小节点出现越慢越缓，设置 0 按照自动化公式',
+          en: 'Lower = slower reveal; 0 = auto formula',
+        },
+        default: 1,
       },
-      default: false,
-    },
-    {
-      key: 'hideNames',
-      type: 'string',
-      input: 'textarea',
-      title: { zh: '🚫 自定义过滤名称', en: '🚫 Custom Excluded Names' },
-      description: {
-        zh: '填入需过滤的节点名称，用逗号或换行分隔。',
-        en: 'Node names to exclude, separated by commas or newlines.',
+      {
+        key: 'labelMaxRatio',
+        type: 'number',
+        title: { zh: '标签密度', en: 'Label Density' },
+        short: {
+          zh: '显示多少比例节点名称(1 = 全部)',
+          en: 'Fraction of nodes eligible to show a name (1 = all)',
+        },
+        default: 1,
       },
-      short: {
-        zh: "要过滤的节点名称，用逗号或换行分隔。",
-        en: "Node names to exclude, separated by commas or newlines.",
+      {
+        key: 'labelJournal',
+        type: 'boolean',
+        title: { zh: '显示日记名字', en: 'Journal Labels' },
+        short: {
+          zh: '日记节点是否显示名字',
+          en: 'Show names on journal nodes',
+        },
+        default: false,
       },
-      default: '',
-    },
-    {
-      key: 'charge',
-      type: 'number',
-      title: { zh: '⚡ 斥力强度', en: '⚡ Repulsion' },
-      description: {
-        zh: '节点之间的排斥力，决定整体疏密。（默认 -0.12）',
-        en: 'Repulsion between nodes; controls overall spread. (default -0.12)',
+      {
+        key: 'labelYield',
+        type: 'boolean',
+        title: { zh: '标签重叠时让位', en: 'Hide Overlapping Labels' },
+        short: {
+          zh: '关：允许重叠；开：重叠的互相让位',
+          en: 'Off: allow overlap; On: overlaps yield',
+        },
+        default: false,
       },
-      short: {
-        zh: "节点间的排斥力，决定整体疏密。绝对值越大越空灵。",
-        en: "Repulsion between nodes; controls overall spread. Larger absolute value = airier.",
+      {
+        key: 'nodeSize',
+        type: 'number',
+        title: { zh: '节点大小', en: 'Node Size' },
+        short: {
+          zh: '节点圆点的大小倍率',
+          en: 'Scale of node dots',
+        },
+        default: 1,
       },
-      default: -0.12,
-    },
-    {
-      key: 'linkDistance',
-      type: 'number',
-      title: { zh: '🔗 连接线长度', en: '🔗 Link Distance' },
-      description: {
-        zh: '相连节点之间的静止距离。（默认 50）',
-        en: 'Resting distance between connected nodes. (default 50)',
+      {
+        key: 'prewarm',
+        type: 'boolean',
+        title: { zh: '后台预热布局', en: 'Prewarm Layout in Background' },
+        short: {
+          zh: '插件加载后在后台把力导向跑到沉降，进图谱第一帧就是最终形态',
+          en: 'Settle in the background; final on first paint',
+        },
+        default: true,
       },
-      short: {
-        zh: "相连节点之间的静止距离。线长决定间距，与「节点大小」正交。",
-        en: "Resting distance between connected nodes. This sets spacing; node size is orthogonal.",
+      {
+        key: 'syncSettleMs',
+        type: 'number',
+        title: { zh: '进图谱时同步抢跑上限 (ms)', en: 'Sync Settle Budget (ms)' },
+        short: {
+          zh: '加载指示后面把沉降一次跑完的时间上限',
+          en: 'Time budget to finish settling behind the loading indicator',
+        },
+        default: 300,
       },
-      default: 50,
-    },
-    {
-      key: 'timelapseRate',
-      type: 'number',
-      title: { zh: '⏳ 演变节奏', en: '⏳ Timelapse Rate' },
-      description: {
-        zh: '每秒出现多少个节点。越小越慢；设 0 则按 Obsidian 的公式自动计算。\n全程时长 = 节点数 ÷ 这个值，所以节点多的时候会很久，嫌久就调大。',
-        en: 'Nodes revealed per second. Lower = slower; 0 = auto (Obsidian\'s formula).\nTotal time = nodeCount ÷ rate, so large graphs take a while — raise this to speed up.',
+      {
+        key: 'revealAnimMs',
+        type: 'number',
+        title: { zh: '图谱显现淡入', en: 'Reveal Fade-in' },
+        short: {
+          zh: '加载指示后节点显现时一次淡入时长，0 = 直接跳出',
+          en: 'Fade-in duration when the graph appears; 0 = instant',
+        },
+        default: 320,
       },
-      short: {
-        zh: "每秒出现多少个节点；0 = 自动。全程时长 = 节点数 ÷ 这个值。",
-        en: "Nodes revealed per second; 0 = auto. Total time = nodeCount ÷ rate.",
+      {
+        key: 'velocityRetain',
+        type: 'number',
+        title: { zh: '速度保留率', en: 'Velocity Retain' },
+        short: {
+          zh: '每帧保留多少速度。越低收敛越快、手感越"重"',
+          en: 'Velocity kept each frame. Lower = converges faster and feels heavier',
+        },
+        default: 0.6,
       },
-      default: 1,
-    },
-    {
-      key: 'labelMaxRatio',
-      type: 'number',
-      title: { zh: '🏷 标签密度', en: '🏷 Label Density' },
-      description: {
-        zh: '多少比例的节点有资格显示名字（1 = 全部，密集处让缩放门槛决定取舍）。（默认 1）',
-        en: 'Fraction of nodes eligible to show a name (1 = all; density is handled by the zoom threshold). (default 1)',
+      {
+        key: 'settleTicks',
+        type: 'number',
+        title: { zh: '活跃时长', en: 'Settle Duration' },
+        short: {
+          zh: '开始布局到完全静止经过多少帧',
+          en: 'Frames from layout start to full rest',
+        },
+        default: 400,
       },
-      short: {
-        zh: "多少比例的节点有资格显示名字（1 = 全部）。",
-        en: "Fraction of nodes eligible to show a name (1 = all).",
+      {
+        key: 'linkBoost',
+        type: 'number',
+        title: { zh: '拖动带动邻域', en: 'Neighbour Pull' },
+        short: {
+          zh: '拖动节点时邻居跟随的程度',
+          en: 'How strongly neighbours follow a dragged node',
+        },
+        default: 16,
       },
-      default: 1,
-    },
-    {
-      key: 'labelJournal',
-      type: 'boolean',
-      title: { zh: '📅 显示日记名字', en: '📅 Journal Labels' },
-      description: {
-        zh: '日记节点旁是否显示名字标签。默认关：只显示圆点，悬浮时仍能看到名字。',
-        en: 'Show name labels on journal nodes? Default off: dots only — hover still reveals the name.',
+      {
+        key: 'releaseAlpha',
+        type: 'number',
+        title: { zh: '松手停位', en: 'Drop Firmness' },
+        short: {
+          zh: '松手后节点活跃度。低则停在放下处；高会被拉回原位',
+          en: 'Activity after release. Lower = stays where dropped; higher = pulled back',
+        },
+        default: 0.05,
       },
-      short: {
-        zh: "日记节点旁是否显示名字。默认只显示圆点，悬浮仍可见。",
-        en: "Show names next to journal nodes. Off by default: dots only, hover reveals.",
+      {
+        key: 'popAmp',
+        type: 'number',
+        title: { zh: '节点弹出幅度', en: 'Pop Overshoot' },
+        short: {
+          zh: '新节点出现时向外过冲幅度',
+          en: 'Overshoot when a new node appears',
+        },
+        default: 0.55,
       },
-      default: false,
-    },
-    {
-      key: 'labelYield',
-      type: 'boolean',
-      title: { zh: '🈳 标签重叠时让位', en: '🈳 Hide Overlapping Labels' },
-      description: {
-        zh: '关闭（默认，与 Obsidian 一致）= 每个节点都显示名字、允许重叠，密集处靠"放大才显示"控制。\n开启 = 重叠的标签互相让位，画面更干净，但会有很多节点永远看不到名字。',
-        en: 'Off (default, matches Obsidian) = every node shows its name, overlap allowed; density is controlled by the zoom threshold.\nOn = overlapping labels yield to each other: cleaner, but many nodes never show a name.',
+      {
+        key: 'popZeta',
+        type: 'number',
+        title: { zh: '弹出阻尼比', en: 'Pop Damping' },
+        short: {
+          zh: '回弹次数',
+          en: 'Number of bounces',
+        },
+        default: 0.3,
       },
-      short: {
-        zh: "关（默认，同 Obsidian）= 名字都显示、允许重叠；开 = 重叠的互相让位。",
-        en: "Off (default, like Obsidian) = all names shown, may overlap; on = overlaps yield.",
+      {
+        key: 'shockMagnitude',
+        type: 'number',
+        title: { zh: '时间波强度', en: 'Shockwave' },
+        short: {
+          zh: '向外扩散的斥力波强度，0：完全关闭',
+          en: 'Outward repulsion wave strength; 0 = disabled',
+        },
+        default: 0,
       },
-      default: false,
-    },
-    {
-      key: 'nodeSize',
-      type: 'number',
-      title: { zh: '🔵 节点大小', en: '🔵 Node Size' },
-      description: {
-        zh: '节点圆点的大小倍率。它【完全不改动布局】—— 线长决定间距，这里只决定直径。范围 0.5~2.5，超过 2.5 会被碰撞顶开反而变松。（默认 1.0）',
-        en: 'Scale of node dots. Does not change the layout at all — link distance controls spacing, this only controls diameter. Range 0.5~2.5; above 2.5 collisions push nodes apart and it gets looser. (default 1.0)',
-      },
-      short: {
-        zh: "节点圆点的大小倍率。完全不改动布局，只改直径。范围 0.5~2.5。",
-        en: "Scale of node dots. Does not change layout, only diameter. Range 0.5~2.5.",
-      },
-      default: 1,
-    },
-    {
-      key: 'prewarm',
-      type: 'boolean',
-      title: { zh: '🚀 后台预热布局', en: '🚀 Prewarm Layout in Background' },
-      description: {
-        zh: '开着：插件加载后在后台把力导向跑到沉降，进图谱时第一帧就是最终形态、不需要再适配一次视野。\n关掉：省下那点 CPU，代价是进图谱时能看见图谱当场"摊开"。',
-        en: 'On: after the plugin loads, the force simulation is settled in the background, so the graph is already in its final form on first paint (no second camera fit).\nOff: saves some CPU, but you will see the graph spread out live when you open it.',
-      },
-      short: {
-        zh: "插件加载后在后台把力导向跑到沉降，进图谱第一帧就是最终形态。",
-        en: "Settle the force simulation in the background so the graph is final on first paint.",
-      },
-      default: true,
-    },
-    {
-      key: 'syncSettleMs',
-      type: 'number',
-      title: { zh: '⏱ 进图谱时同步抢跑上限 (ms)', en: '⏱ Sync Settle Budget (ms)' },
-      description: {
-        zh: '后台预热没跑完时，在加载指示后面把剩下的沉降一次跑完的时间上限。\n实测整段沉降：200 节点 ≈0.5s、500 节点 ≈2.0s、1000 节点 ≈7.2s。\n所以只有中小库能在预算内一步到位；超预算会立刻回退（大库仍会看到图谱摊开）。',
-        en: 'When the background prewarm has not finished, how long we may block (behind the loading indicator) to finish settling.\nMeasured total settle: 200 nodes ≈0.5s, 500 nodes ≈2.0s, 1000 nodes ≈7.2s.\nOnly small/medium graphs fit in budget; over budget we fall back immediately (large graphs still spread out live).',
-      },
-      short: {
-        zh: "预热没跑完时，在加载指示后面把沉降一次跑完的时间上限。",
-        en: "Time budget to finish settling behind the loading indicator when prewarm is unfinished.",
-      },
-      default: 300,
-    },
-    {
-      key: 'revealAnimMs',
-      type: 'number',
-      title: { zh: '✨ 图谱显现淡入 (ms)', en: '✨ Reveal Fade-in (ms)' },
-      description: {
-        zh: '图谱从加载指示后面显现时的一次淡入时长，0 = 直接跳出来。\n只作用于"刚现场跑完沉降"的那次首开；之后走缓存的重开是静止的。',
-        en: 'Duration of the one fade-in when the graph appears from behind the loading indicator; 0 = instant.\nOnly applies to the first open that just settled live; later opens from cache are static.',
-      },
-      short: {
-        zh: "图谱从加载指示后面显现时的一次淡入时长，0 = 直接跳出。",
-        en: "Fade-in duration when the graph appears from behind the loading indicator; 0 = instant.",
-      },
-      default: 320,
-    },
-    {
-      key: 'velocityRetain',
-      type: 'number',
-      title: { zh: '🌀 速度保留率', en: '🌀 Velocity Retain' },
-      description: {
-        zh: '每帧保留多少速度。越低收敛越快、越"重"。（默认 0.60）',
-        en: 'How much velocity is kept each frame. Lower = converges faster, feels heavier. (default 0.60)',
-      },
-      short: {
-        zh: "每帧保留多少速度。越低收敛越快、手感越\"重\"。",
-        en: "Velocity kept each frame. Lower = converges faster and feels heavier.",
-      },
-      default: 0.6,
-    },
-    {
-      key: 'settleTicks',
-      type: 'number',
-      title: { zh: '⏱ 活跃时长', en: '⏱ Settle Duration' },
-      description: {
-        zh: '图谱从开始布局到完全静止经过多少帧。这个值也决定【预热】要跑多久。（默认 400）',
-        en: 'Frames from start of layout to full rest. Also decides how long the background prewarm runs. (default 400)',
-      },
-      short: {
-        zh: "从开始布局到完全静止经过多少帧。也决定后台预热要跑多久。",
-        en: "Frames from layout start to full rest. Also sets how long the background prewarm runs.",
-      },
-      default: 400,
-    },
-    {
-      key: 'linkBoost',
-      type: 'number',
-      title: { zh: '🧲 拖动带动邻域', en: '🧲 Neighbour Pull' },
-      description: {
-        zh: '拖动节点时邻居跟随的力度，只作用于被拖节点自己的连线。实测 16 最优；超过 24 有让布局发散的风险。（默认 16）',
-        en: 'How strongly neighbours follow a dragged node; only affects that node\'s own links. Measured optimum 16; above 24 the layout may diverge. (default 16)',
-      },
-      short: {
-        zh: "拖动节点时邻居跟随的力度，只影响被拖节点自己的连线。",
-        en: "How strongly neighbours follow a dragged node; only that node's own links.",
-      },
-      default: 16,
-    },
-    {
-      key: 'releaseAlpha',
-      type: 'number',
-      title: { zh: '🪂 松手停位', en: '🪂 Drop Firmness' },
-      description: {
-        zh: '松手后布局的活跃度。越低，节点越能停在你放下的地方；越高越会被连线拉回原位。实测 0.05 最优，低于 0.02 图会僵住。（默认 0.05）',
-        en: 'Layout activity after release. Lower = nodes stay where you dropped them; higher = links pull them back. Measured optimum 0.05; below 0.02 the graph stiffens. (default 0.05)',
-      },
-      short: {
-        zh: "松手后的活跃度。越低越能停在放下处；越高越会被拉回原位。",
-        en: "Activity after release. Lower = stays where dropped; higher = pulled back.",
-      },
-      default: 0.05,
-    },
-    {
-      key: 'popAmp',
-      type: 'number',
-      title: { zh: '💥 节点弹出幅度', en: '💥 Pop Overshoot' },
-      description: {
-        zh: '新节点出现时向外过冲的幅度。（默认 0.55）',
-        en: 'Overshoot when a new node appears. (default 0.55)',
-      },
-      short: {
-        zh: "新节点出现时向外过冲的幅度。",
-        en: "Overshoot when a new node appears.",
-      },
-      default: 0.55,
-    },
-    {
-      key: 'popZeta',
-      type: 'number',
-      title: { zh: '💥 弹出阻尼比', en: '💥 Pop Damping' },
-      description: {
-        zh: '越低回弹次数越多。（默认 0.30）',
-        en: 'Lower = more bounces. (default 0.30)',
-      },
-      short: {
-        zh: "弹出阻尼比，越低回弹次数越多。",
-        en: "Pop damping ratio; lower = more bounces.",
-      },
-      default: 0.3,
-    },
-    {
-      key: 'shockMagnitude',
-      type: 'number',
-      title: { zh: '🌊 时间波强度', en: '🌊 Shockwave' },
-      description: {
-        zh: '时间轴推进时，向外扩散的斥力波前强度。设为 0 完全关闭。（默认 0）',
-        en: 'Strength of the outward repulsion wavefront as the timeline advances. 0 disables it. (default 0)',
-      },
-      short: {
-        zh: "时间轴推进时向外扩散的斥力波强度，0 完全关闭。",
-        en: "Outward repulsion wave as the timeline advances; 0 disables it.",
-      },
-      default: 0,
-    },
-  ];
+    ];
 
   /**
-   * 把文案表编译成 Logseq 能用的 schema（当前语言）。
-   * @param {object[]} [entries] 不传则用内置表
+   * 把文案表编译成 Logseq 能用的 schema
+   * @param {object[]} [entries] 
    */
-  function schema(entries) {
-    const src = entries || SCHEMA;
-    return src.map((e) => {
-      const out = {};
-      for (const k in e) {
-        if (k === 'title') out.title = t(e.title);
-        else if (k === 'description') out.description = t(e.short || e.description);
-        else if (k === 'short') { /* 不直接进 schema */ }
-        else out[k] = e[k];
+    function schema(entries) {
+      const src = entries || SCHEMA;
+      return src.map((e) => {
+        const out = {};
+        for (const k in e) {
+          if (k === 'title') out.title = t(e.title);
+          else if (k === 'short') { /* 不直接进 schema */ }
+          else out[k] = e[k];
+        }
+        out.description = t(e.short);
+        return out;
+      });
       }
-      return out;
-    });
-  }
 
   function audit(entries) {
     const src = entries || SCHEMA;
@@ -400,10 +311,10 @@
     try {
       const tag = String(el.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'button' || tag === 'select' ||
-          tag === 'textarea' || tag === 'option') return true;
+        tag === 'textarea' || tag === 'option') return true;
       if (el.querySelector &&
-          el.querySelector('input, button, select, textarea, option')) return true;
-    } catch (e) { /* 假 DOM / 只读节点：当作没有控件，交给上层继续判断 */ }
+        el.querySelector('input, button, select, textarea, option')) return true;
+    } catch (e) { /* 交给上层继续判断 */ }
     return false;
   }
 
@@ -451,7 +362,7 @@
         continue;
       }
       // 目标语言
-      if (target === cur) continue;               
+      if (target === cur) continue;
 
       try {
         el.textContent = target;
