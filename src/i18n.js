@@ -1,15 +1,4 @@
-/*
- * GFI.i18n — 设置面板的中英文双语文案
- * 用法：
- *   GFI.i18n.set('zh' | 'en' | 0 | 1)             // 切换（也吃 enum 的索引）
- *   GFI.i18n.schema(entries)                      // 生成 Logseq 设置面板 schema
- *   GFI.i18n.t({ zh:'中文', en:'English' }, 'zh') // 取某一语言的一条文案
- *   GFI.i18n.relabelPanel()                       // 就地改写已渲染的面板文案
- * ── 语言值怎么持久化 ──
- * 走 `logseq.updateSettings({ language })`（见 config.js 的 onFreshSettings 写入
- * 与 syncSettings 的读取）。normalize() 同时接受字符串与 enum 的索引形态 ——
- * 实机反馈过"选了英文、下次还是中文"，索引形态就是最可能的原因。
- */
+  /* 设置面板的中英文双语 */
 (function (GFI) {
   'use strict';
   if (GFI.i18n) return;
@@ -116,7 +105,7 @@
           zh: '越小节点出现越慢越缓，设置 0 按照自动化公式',
           en: 'Lower = slower reveal; 0 = auto formula',
         },
-        default: 1,
+        default: 0.5,
       },
       {
         key: 'labelMaxRatio',
@@ -261,7 +250,7 @@
     ];
 
   /**
-   * 把文案表编译成 Logseq 能用的 schema
+   * 把文案表编译成 Logseq 的 schema
    * @param {object[]} [entries] 
    */
     function schema(entries) {
@@ -320,14 +309,14 @@
 
   /**
    * 就地把面板上的文案换成当前语言。
-   * @returns {number} 改写条数（0 = 没找到可改的节点，说明结构变了）
+   * @returns {number} 改写条数
    */
   function relabelPanel(opts) {
     const doc = GFI.topDoc;
     if (!doc || !doc.querySelectorAll) return opts && opts.debug ? { hits: 0, scanned: 0, missed: [] } : 0;
     const debug = !!(opts && opts.debug);
 
-    // 候选表：两个语言的 title / description / short → 目标语言文本
+    // 候选表
     const map = new Map();
     for (const e of SCHEMA) {
       for (const f of ['title', 'description', 'short']) {

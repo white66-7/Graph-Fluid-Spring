@@ -101,7 +101,7 @@
       const v = GFI.topWin.getComputedStyle(GFI.topDoc.documentElement)
         .getPropertyValue(GFI.config.render.bgCssVar).trim();
       if (v) return v;
-    } catch (e) {}
+    } catch (e) { }
     return GFI.config.render.bgFallback;
   }
 
@@ -131,12 +131,12 @@
       const prev = w.__PIXI_APP_INIT__;
       captureHook = function (app, version) {
         record('原生 Pixi 起画（原生图谱此刻已经能看）');
-        try { if (app && app.canvas) capturedApps.push(app); } catch (e) {}
+        try { if (app && app.canvas) capturedApps.push(app); } catch (e) { }
         if (takeoverRoot) {
-        // 如果发现我们正在接管，就预约一个暂停操作，但稍后再做
-          try { GFI.topWin.setTimeout(pauseNativeRenderers, 0); } catch (e) {}
+          // 如果发现我们正在接管，就预约一个暂停操作，但稍后再做
+          try { GFI.topWin.setTimeout(pauseNativeRenderers, 0); } catch (e) { }
         }
-        if (typeof prev === 'function') { try { prev(app, version); } catch (e) {} }
+        if (typeof prev === 'function') { try { prev(app, version); } catch (e) { } }
       };
       // 此时跑完别人的 __PIXI_APP_INIT__ 
       // 注册自己的
@@ -168,7 +168,7 @@
         app.stop();
         if (pausedApps.indexOf(app) < 0) pausedApps.push(app);
         k++;
-      } catch (e) {}
+      } catch (e) { }
     }
     return k;
   }
@@ -176,17 +176,17 @@
   /* 渲染重新循环 */
   function resumeNativeRenderers() {
     for (const app of pausedApps) {
-      try { app.start(); } catch (e) {}
+      try { app.start(); } catch (e) { }
     }
     pausedApps.length = 0;
   }
 
-   //  卸载__PIXI_APP_INIT__函数, 由index.js 的 beforeunload 调用。
-   // 不放在 unmount 里因为离开图谱再进来会漏掉一个 App
+  //  卸载__PIXI_APP_INIT__函数, 由index.js 的 beforeunload 调用。
+  // 不放在 unmount 里因为离开图谱再进来会漏掉一个 App
   function releasePixiCapture() {
     const w = GFI.topWin;
     if (captureInstalled && w) {
-      try { if (w.__PIXI_APP_INIT__ === captureHook) delete w.__PIXI_APP_INIT__; } catch (e) {}
+      try { if (w.__PIXI_APP_INIT__ === captureHook) delete w.__PIXI_APP_INIT__; } catch (e) { }
     }
     captureInstalled = false;
     captureHook = null;
@@ -225,7 +225,7 @@
       toolbarPointer: nativeToolbar ? nativeToolbar.style.pointerEvents : '',
       rootPosition: root.style.position,
     };
-    
+
     if (GFI.topWin.getComputedStyle(root).position === 'static') {
       root.style.position = 'relative';
     }
@@ -280,7 +280,7 @@
           resizeCb(m.w, m.h);
         });
       });
-      try { observer.observe(root); } catch (e) {}
+      try { observer.observe(root); } catch (e) { }
     }
 
     const api = {
@@ -293,7 +293,7 @@
         resizeCb = cb;
         const m = measure();
         // 回调执行
-        cb(m.w, m.h); 
+        cb(m.w, m.h);
       },
 
       readBackground,
@@ -330,11 +330,11 @@
         // 交还宿主
         resumeNativeRenderers();
         takeoverRoot = null;
-        try { if (observer) observer.disconnect(); } catch (e) {}
+        try { if (observer) observer.disconnect(); } catch (e) { }
         observer = null;
-        if (resizeRaf != null) { try { GFI.topWin.cancelAnimationFrame(resizeRaf); } catch (e) {} resizeRaf = null; }
+        if (resizeRaf != null) { try { GFI.topWin.cancelAnimationFrame(resizeRaf); } catch (e) { } resizeRaf = null; }
         resizeCb = null;
-        try { root.style.position = nativeState.rootPosition; } catch (e) {}
+        try { root.style.position = nativeState.rootPosition; } catch (e) { }
         // 还原原生元素
         if (nativeCanvas) {
           nativeCanvas.style.visibility = nativeState.canvasVisibility;
@@ -344,7 +344,7 @@
           nativeToolbar.style.visibility = nativeState.toolbarVisibility;
           nativeToolbar.style.pointerEvents = nativeState.toolbarPointer;
         }
-        try { container.remove(); } catch (e) {}
+        try { container.remove(); } catch (e) { }
         if (root.__gfiContainer === container) delete root.__gfiContainer;
         delete root.__gfiMounted;
       },
@@ -364,7 +364,7 @@
 
   function record(label, detail) {
     let t = 0;
-    try { t = GFI.topWin.performance.now() - origin; } catch (e) {}
+    try { t = GFI.topWin.performance.now() - origin; } catch (e) { }
     events.push({ t: Math.round(t), label, detail: detail === undefined ? '' : detail });
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
   }
@@ -398,7 +398,7 @@
         record(now ? '宿主挂上图谱 DOM' : '宿主移除图谱 DOM');
       });
       mo.observe(doc.body, { childList: true, subtree: true });
-    } catch (e) {}
+    } catch (e) { }
   }
 
   // ---- 注册 __PIXI_APP_INIT__ 函数

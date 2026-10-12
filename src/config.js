@@ -44,8 +44,6 @@
     reheat: {
       dataChange: 0.6,
       cutoff: 0.45,
-      // 🌟 0.30 —— 照抄 Obsidian 实测值。
-      //
       //   实测来源：app.js 的 setData()，数据一变（= 有时间旅行揭示/新增节点）就
       //     `this.worker.postMessage({nodes:a, links:Y, alpha:.3, run:true})`
       //   这是 Obsidian 在【力的层面】对「节点出现」做的唯一一件事 —— 没有速度
@@ -238,20 +236,9 @@
     lod: {
       auto: true,
       levels: [
-        // 🌟 labelCap 大幅放宽（240→800 等）：Obsidian 的做法是【所有节点】都
-        //   有名字，密集处靠重叠让位自动取舍 —— cap 只是防极端帧的首帧建精灵
-        //   爆炸（800 张 ≈ 80ms 一次性成本），不是常规取舍手段。
         { maxN: 800, glow: 'all', glowMinScale: 0, labelCap: 800, collideIter: 2, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
         { maxN: 2200, glow: 'deg2', glowMinScale: 0, labelCap: 600, collideIter: 1, skipIsolatedCharge: false, chargeEveryNth: 1, pulses: true },
-        // ⚠ 降档链必须【单调变便宜】。L2 原来写的是 glow:'all'，而 L1 是 'deg2' ——
-        //   于是从 L1 降到 L2、且相机缩放 k ≥ glowMinScale 时，反而给全部叶子
-        //   节点补上了辉光：在"因为太慢所以降档"的那一刻增加了绘制量。
-        //   glow 是纯 fill-rate 开销（半尺寸 spread×rScreen 的 alpha 混合大位图），
-        //   是这个渲染器最贵的一项，绝不能反向。
         { maxN: 5000, glow: 'deg2', glowMinScale: 0.5, labelCap: 400, collideIter: 1, skipIsolatedCharge: true, chargeEveryNth: 1, pulses: true },
-        // 🌟 L3 collideIter 0→1：碰撞参与「均匀分布」（配合 collidePad 保持间距），
-        //   且它是位置修正不是力，只在醒着时跑，沉降后零成本。降档链仍单调变便宜：
-        //   L3 相比 L2 还有 chargeEveryNth:2 / glow:'hover' / pulses:false / labelCap 200。
         { maxN: Infinity, glow: 'hover', glowMinScale: 1, labelCap: 200, collideIter: 1, skipIsolatedCharge: true, chargeEveryNth: 2, pulses: false },
       ],
       sampleFrames: 30,
@@ -270,24 +257,7 @@
       hideShrink: 0.85,
       revealAnchorJitter: 30,
       revealFringeJitter: 80,
-      // 🌟 演变节奏 = 【每秒出现多少个节点】。这是唯一的节奏旋钮。
-      //
-      //   全程时长是【果】不是【因】：
-      //       playDurationSec = 有时间戳的节点数 / revealRate
-      //   81 个节点 @ 1   → 81 秒
-      //   81 个节点 @ 0.5 → 162 秒
-      //   600 个节点 @ 60 → 10 秒
-      //   节点多的时候嫌久，直接把界面上「演变节奏」调大即可。
-      //
-      // 为什么不再用「总时长」当旋钮（baseDurationSec，已删除）：
-      //   ① 同一个时长在小图上太快、大图上太慢，两边都不对 —— 用户没法用一个
-      //      数字同时表达"我想看清每个节点"和"我不想等 40 分钟"。
-      //   ② 由时长反推速率，就必须给速率加护栏；而护栏（曾经是 revealRateMin=2.5）
-      //      会把用户显式设的时长顶掉 —— 设 60 秒被卡回 32 秒，设置项形同虚设。
-      //   直接设速率就没有反推、没有护栏、没有覆盖。
-      //   设成 0 = 自动套用 Obsidian 的原公式 clamp(0.5·√边数, 5, 100) 节点/秒。
-      revealRate: 1.0,
-      // 同时间戳大簇是否按 rate 摊开逐帧诞生（关掉 = 回到「一帧炸出一整簇」）
+      revealRate: 0.5,
       burstSmoothing: true,
       speeds: [0.5, 1, 2, 4],
     },
@@ -323,40 +293,16 @@
       idleFrames: 30,   // 每30帧做退化检测
       degenerateCheckEvery: 30,
       debug: false,
-      // 数据来源：'logseq' = 查真实库，'demo' = 合成图。
-      // ⚠ 这两个键一直挂在这里，而所有读者都写成 `GFI.config.dataSource`
-      //   —— 一层读错，永远读到 undefined。后果不是崩，而是**静默走默认值**：
-      //   把 dataSource 改成 'demo' 毫无反应；那段 `预热启动 source=undefined`
-      //   的实机日志就是这么来的。
-      //   修法是把读者改成 `GFI.config.runtime.xxx`（不改这里的路径）——
-      //   配置结构一动，用户存档里的键名就全对不上了。
       dataSource: 'logseq',
       demoCount: 400,
     },
 
-    // 布局预热（见 src/warm.js）
+    // 布局预热
     warm: {
-      // 开关。开着 = 插件加载后就在后台把力导向跑到底，进图谱时第一帧就是
-      // 最终布局；关掉 = 省下那点 CPU，代价是进图谱时能看见图谱当场"摊开"。
       enabled: true,
-      // 后台预热一帧给物理多少毫秒。调大 = 更快跑完、更快"点开就是最终形态"，
-      // 代价是插件刚加载那几秒主线程更紧（实测 500 节点整段沉降约 2 秒）。
       budgetMs: 26,
-      // 进图谱时【同步抢跑】的时间上限（ms）。后台预热没跑完时，在加载指示
-      // 后面把剩下的沉降一次跑完 —— 此刻画布上什么都没有，阻塞不影响已显示
-      // 的东西。
-      // ⚠ 要给死上限的依据（test/warm-cost.js 实测）：整段沉降
-      //     200 节点 ≈0.5s　500 节点 ≈2.0s　1000 节点 ≈7.2s
-      //   所以"能全部跑完"只对中小库成立。300ms ≈ 让 500~700 节点以内的库
-      //   一步到位；更大的库会超预算回退（仍然会看到图谱当场摊开），
-      //   那时靠后台预热把第二次之后的开图救回来。
       syncSettleMs: 300,
-      // 上限 = settleTicks × 这个倍率。实测 371 tick 就睡着了（settleTicks=400），
-      // 所以它平时用不到，只在"alpha 掉不下去"的异常库上兜底。
       maxTicksFactor: 2.5,
-      // 图谱显现的那一下用多久淡入（ms）。0 = 直接跳出来。
-      // 只作用于「刚在 loader 后面跑完沉降」的那一次（首次进图谱）；
-      // 之后走缓存的重开是静止的，不会有第二次淡入。
       revealAnimMs: 320,
     },
   };
@@ -374,17 +320,7 @@
   GFI.config = clone(defaults);
   GFI.configDefaults = defaults;
 
-  // =========================================================================
   // Logseq 设置面板 schema
-  // =========================================================================
-  // ⚠ 文案与结构分离：所有 title / description 都在 src/i18n.js 里，按语言给出
-  //   { zh, en } 两版；这里只负责把它们编译成当前语言的 schema。
-  //
-  // ⚠⚠ 必须在【生成 schema 之前】把默认值绑到 configDefaults。
-  //   旧代码是先写死 schema.default（linkDistance: 45、velocityRetain: 0.8…），
-  //   再用 SCHEMA_BINDINGS 循环覆盖一次 —— 结果面板上显示的默认值、描述里写的
-  //   数字、和真正生效的值是【三套】。用户看到的就是"改了没反应 / 值跟我设的
-  //   不一样"。现在先算绑定，再生成 schema，只留一处真值来源。
   const SCHEMA_BINDINGS = {
     charge: () => GFI.configDefaults.physics.charge,
     linkDistance: () => GFI.configDefaults.physics.linkDistance,
@@ -402,19 +338,13 @@
     nodeSize: () => GFI.configDefaults.render.nodeSize,
     hideClassIdents: () => GFI.configDefaults.data.hideClassIdents.join(', '),
     hideNames: () => GFI.configDefaults.data.hideNames.join(', '),
-    // 本轮新增：预热相关的三个旋钮
     prewarm: () => GFI.configDefaults.warm.enabled,
     syncSettleMs: () => GFI.configDefaults.warm.syncSettleMs,
     revealAnimMs: () => GFI.configDefaults.warm.revealAnimMs,
-    // 语言：默认中文
     language: () => '中文',
-    // ⚠ useNativeGraph 已从设置面板【删除】（用户要求：这个开关没用了）。
-    //   `config.useNativeGraph` 与 `main.js` 里的原生模式回退逻辑仍然保留，
-    //   只是不再有 UI 入口 —— syncSettings 里 `c.useNativeGraph = !!s.useNativeGraph`
-    //   在键不存在时得到 false，也就是"始终用我们的图谱"。
   };
 
-  // 先把默认值写回 i18n 的条目表，再编译成 schema
+  
   const i18n = GFI.i18n;
   if (!i18n) {
     console.error('[GFI] src/i18n.js 未加载 —— 检查 index.html 的脚本顺序');
@@ -472,22 +402,13 @@
 
     c.useNativeGraph = !!s.useNativeGraph;
 
-    // ---- 语言 ----
-    // ⚠ 语言【不参与 fresh 判定】—— 它跟物理参数无关，升级 CFG_VERSION 不该
-    //   把用户选好的语言重置回中文。
-    //
-    // ⚠⚠ 这里必须显式回写 `s.language` 一份【规范形态】。
-    //   实机反馈「上次选了英文，这次进去还是中文」，根因是 Logseq 的 enum 控件
-    //   可能把选择存成索引（0/1）或别的形态，而我们读的时候只认字符串。
-    //   i18n.normalize() 现在两种都吃，但为了不再依赖"Logseq 到底存了什么"，
-    //   我们把归一化后的值按 enumChoices 的文案写回设置（'中文' / 'English'）——
-    //   下次启动无论走哪条路读到的都是同一种形态。
+    // 语言 
     if (GFI.i18n) {
-      const langCode = GFI.i18n.set(s.language);           // 归一化并生效
+      const langCode = GFI.i18n.set(s.language);         
       const idx = GFI.i18n.LANGS.indexOf(langCode);
       const canonical = GFI.i18n.ENUM_CHOICES[idx >= 0 ? idx : 0];
       if (s.language !== canonical) {
-        s.language = canonical;                             // 顺手纠正存档
+        s.language = canonical;                      
         try {
           if (typeof window !== 'undefined' && window.logseq && window.logseq.updateSettings) {
             window.logseq.updateSettings({ language: canonical });
@@ -497,9 +418,7 @@
       GFI.__langDiag = { 存档原始值: s.__langRaw, 归一化: langCode, 写回: canonical };
     }
 
-    // ---- 布局预热 ----
-    // ⚠ prewarm 的默认值是 true，所以【不能】用 !!s.prewarm：老存档里没有这个键，
-    //   !!undefined === false，会把默认开着的东西静默关掉。
+    // 布局预热
     c.warm.enabled = fresh ? d.warm.enabled : (s.prewarm === undefined ? d.warm.enabled : !!s.prewarm);
     c.warm.syncSettleMs = pick('syncSettleMs', d.warm.syncSettleMs);
     c.warm.revealAnimMs = pick('revealAnimMs', d.warm.revealAnimMs);
@@ -519,8 +438,6 @@
     c.timeline.revealRate = pick('timelapseRate', d.timeline.revealRate);
     c.render.labelMaxRatio = pick('labelMaxRatio', d.render.labelMaxRatio);
     c.render.labelJournal = fresh ? d.render.labelJournal : !!s.labelJournal;
-    // 布尔默认 false 时不能照抄 !!s.xxx —— 这里默认就是 false，所以「缺省 = 关」
-    // 与「用户显式关掉」是同一个值，直接 !!s 即可，不会翻转语义。
     c.render.labelYield = fresh ? d.render.labelYield : !!s.labelYield;
     c.render.nodeSize = pick('nodeSize', d.render.nodeSize);
 
