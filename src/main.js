@@ -1,5 +1,4 @@
-// 装配 + rAF循环 + 公开 API
-
+// 负责画图
 (function (GFI) {
   'use strict';
   if (GFI.Main) return;
@@ -34,32 +33,29 @@
 
     let nativeMode = !!cfg.useNativeGraph;
 
-    // ---- 挂载即接管 ----
-    // 一挂上就把原生画布藏掉。这是"点进去就是我的样式"的前提：只要原生图谱
-    // 还显示着，用户必然先看到它。
-    // 代价是"数据到达前画布是空的"，用 .gfi-loader 顶上（而不是让原生图谱顶）。
+    // 挂载即接管 
     const deferTakeover = false;
     const overlay = GFI.Overlay.mount(root, { nativeVisible: deferTakeover });
     if (!overlay) return null;
 
     GFI.Overlay.record('overlay 挂载完成',
-      deferTakeover ? '（原生图谱继续显示）' : '（原生图谱已隐藏，等待数据）');
+      deferTakeover ? '原生图谱继续显示' : '原生图谱已隐藏');
     if (!deferTakeover) overlay.showLoader();
 
     const listeners = GFI.util.createListenerRegistry();
     const emitter = GFI.util.createEmitter();
 
-    // ---- 相机 ----
+    // 相机
     const cam = GFI.Camera.create(1, 1);
 
-    // ---- 管线 ----
+    // 管线
     let P = createPipeline(overlay, cam, opts.nodes || [], opts.links || [], null);
     let renderer = P.renderer;
 
-    // ---- 主题背景 ----
+    // 主题背景
     renderer.setBackground(overlay.readBackground());
 
-    // ---- 脏标记 / 循环状态 ----
+    // 循环状态
     let dirty = true;
     let rafId = null;
     let lastTime = 0;
@@ -207,7 +203,7 @@
       markDirty();
     });
 
-    // ---- 工具栏 ----
+    // 工具栏
     const toolbar = GFI.Toolbar.create(overlay.toolbar, {
       onTogglePlay() { if (P.timeline) { P.timeline.toggle(); syncToolbar(); } },
       onScrub(p) {
@@ -243,7 +239,7 @@
       }
     }
 
-    // ---- 交互 ----
+    // 交互 
     function attachInteraction() {
       if (P.inter) P.inter.destroy();
       P.inter = GFI.Interaction.create(overlay.canvas, P.D, cam, P.sim, {
@@ -406,11 +402,12 @@
         acc += elapsed;
         frameCount++;
 
-        // ---- 退化场景：canvas 尺寸塌缩 ----
+        //  canvas 尺寸维护 
         if (frameCount % cfg.runtime.degenerateCheckEvery === 0) {
           const m = overlay.measure();
           if (m.w !== cssW || m.h !== cssH) {
             cssW = m.w; cssH = m.h;
+            // 设备像素比
             const dpr = Math.min(GFI.topWin.devicePixelRatio || 1, cfg.render.maxDpr);
             cam.resize(cssW, cssH);
             renderer.resize(cssW, cssH, dpr);
@@ -426,7 +423,7 @@
 
         const vhWorld = cssH / Math.max(0.01, cam.k);
 
-        // ---- 模拟子步 ----
+        // 模拟子步
         let substeps = 0;
         const maxSub = cfg.runtime.maxSubsteps;
         while (acc >= DT && substeps < maxSub) {
@@ -437,56 +434,31 @@
           substeps++;
         }
 
-        // 🌟 特效推进必须是【每渲染帧一次】，不能放在上面的物理子步循环里。
-        //
-        //   为什么：Obsidian 的节点淡入是 `fadeAlpha = uZ(fadeAlpha, 1)` —— 每【渲染帧】
-        //   一次（在 rAF 的 renderCallback 里）。我们原先按【物理子步】推：
-        //     · 高刷屏（120Hz）：elapsed 8.3ms < DT，一半的帧一个子步都没有，
-        //       淡入直接停顿 → 一卡一卡地出现；
-        //     · 掉帧（33ms）：一帧跑 2 个子步，alpha 连跳两级 → 一次跳 +0.29。
-        //   实测这个"跳"就是「节点出现得突然」的来源之一（见 test/…probe）。
-        //   传真实 elapsed 而不是 DT，弹簧/淡出/激波那几条【本来就是 dt 累计】的
-        //   路径行为不变；只有 Obsidian 淡入这条（按调用次数递推）被修正为每帧一步。
+        // 每渲染帧一次特效
         P.fx.update(Math.min(cfg.runtime.maxFrameMs, Math.max(0, elapsed)) / 1000);
   
         if (substeps >= maxSub) acc = 0;
 
-        // 模拟睡着时 chargeGrid 不会自己重建，而拖拽是【唯一】在睡眠状态下直接写
-        // 节点坐标的路径：sim.pin() 是同步写 x/y 的，且零度节点刻意不 reheat、
-        // 不抬 alphaTarget（见 interaction.js onPointerDown）→ 模拟全程睡着。
-        // 剔除（renderer.setGrid(sim.grid)）与命中测试都复用这张网格，不补这一下
-        // 的话，被拖的节点会以【入睡时的旧位置】参与剔除 —— 拖出余量后就地消失、
-        // 也点不中。只在拖拽进行中补，每帧一次 O(n)，睡眠期间零成本。
+        // 拖拽重建网格
         if (!P.sim.isAwake() && P.inter && P.inter.dragNode >= 0) P.sim.rebuildGrid();
 
-        // ---- 视野缓动（每帧一次，不是每 substep —— 它是时间驱动的）----
+        // 视野缓动
         stepCamAnim(elapsed / 1000);
 
-        // ---- 沉降后自动适配视野（见 autoFitPending 的说明）----
-        // ⚠ instantReveal 时整段跳过：吃到预热布局的那一次装载，setData 里的
-        //   fitView 已经是在【最终布局】上算的，再"补一次缓动"就是用户抱怨的
-        //   第③段（"接着才视角适配"）。
+        // 沉降后自动适配视野
         if (!instantReveal && autoFitPending && !P.sim.isAwake() && !(P.inter && P.inter.interacted)) {
           autoFitPending = false;
           const b = GFI.Data.bounds(P.D, true);
-          // 只有在差异明显时才动相机，避免连续的微调抖动
+          // 差异明显时改动相机
           const curW = cam.W / cam.k, curH = cam.H / cam.k;
           const wantW = Math.max(1, b.maxX - b.minX), wantH = Math.max(1, b.maxY - b.minY);
           if (Math.abs(curW - wantW) / wantW > 0.25 || Math.abs(curH - wantH) / wantH > 0.25) {
-            // 缓动而不是瞬变 —— 种子布局到沉降完的图谱包围盒差 40%+，
-            // 瞬变就是整个画面"啪"地跳一下
+            // 缓动
             animateFitTo(b, cfg.camera.fitAnimMs);
           }
         }
 
-        // ---- 视觉层 alpha（含"从加载态显现"的一次淡入）----
-        // ⚠ 走 canvas 的 CSS opacity，不碰 renderer。
-        //   为什么：渲染器里 ctx.globalAlpha 有 13 处赋值（边按 alpha 分桶、
-        //   辉光按增益、节点按 renderAlpha...），要"整体乘一个系数"就得改那 13 处，
-        //   而且任何一个漏掉都会在淡入时露出来。CSS opacity 是一次性、整层的，
-        //   且只在首帧后那 0.3 秒里非 1 —— 代价（多一层合成）可以忽略。
-        //   这也是【唯一】让 warm 路径动起来的东西：相机不在其中，它的 fit 在
-        //   setData 里一次算完，所以不存在"接着才适配视角"。
+        // 图谱显现时的一次淡入
         let visualAlpha = 1;
         if (revealAnim) {
           revealAnim.t += elapsed / 1000;
@@ -494,42 +466,29 @@
           if (!(rp < 1)) rp = 1;
           visualAlpha = 1 - Math.pow(1 - rp, 3);        // ease-out cubic
           if (rp >= 1) revealAnim = null;
-          markDirty();                                  // 保持循环活着（busy 含 dirty）
+          markDirty();                                  // 保持循环
         }
         if (visualAlpha !== lastVisualAlpha) {
           lastVisualAlpha = visualAlpha;
           overlay.canvas.style.opacity = visualAlpha >= 1 ? '' : String(visualAlpha.toFixed(3));
         }
 
-        // ---- 标签显隐 —— 🌟 随缩放【连续】淡变（Obsidian 的 text fade threshold）----
-        //
-        // 原来是二元滞回（k ≥ showK 整层开 / k < hideK 整层关）再叠一层时间补间。
-        // 但 `render.labelYield = false`（默认，Obsidian 行为）关掉了标签之间的重叠
-        // 让位之后，缩放淡变就成了【唯一】的密度控制手段 —— 视口内节点一多，标签
-        // 必然互相压住，只能靠「缩小就别读字」来取舍。
-        // 所以改成随 k 连续过渡：缩小过程中标签是渐渐淡掉的，而不是到某一帧整层啪地消失。
-        // 阈值仍相对于 fitView 缩放（fitK），换一张图不用重调。
+        // 标签随相机缩放连续淡变
         const k = cam.k;
         const rc = cfg.render;
         const showK = fitK > 0 ? fitK * rc.labelShowScaleRatio : rc.labelFallbackShow;
         const hideK = fitK > 0 ? fitK * rc.labelHideScaleRatio : rc.labelFallbackHide;
-        // k 在 [hideK, showK] 之间线性映射 0→1，两端外截断
+        // k 在 [hideK, showK] 之间线性映射 0→1
         const t = (k - hideK) / Math.max(1e-9, showK - hideK);
         const want = t <= 0 ? 0 : (t >= 1 ? 1 : t);
 
-        // 🌟 L3：在连续目标之上再叠一层时间补间（~90ms/10%）——
-        //   k 连续变化时它让淡变更顺；相机瞬变（fitView 跳转）时给出平滑过渡。
-        //   ⚠ instantReveal 时直接取终值：那 90ms 的淡入正是"样式还在长出来"
-        //     的那一点观感，而这一步的目标就是"点进去已经是最终样式"。
         labelFade = instantReveal ? want : labelFade + (want - labelFade) * Math.min(1, elapsed * 0.011);
         if (labelFade < 0.001) labelFade = 0;
         else if (labelFade > 0.999) labelFade = 1;
-        // ⚠ labelsOn 必须与【实际 alpha】一致（而不是 want）：want 是个极小的正数时
-        //   标签几乎不可见，却仍会让渲染层整层跑一遍 drawLabels（含精灵创建）。
-        //   这也是 renderer 里「labelFade = 0 时整层跳过」那条断言的入口条件。
+        // labelsOn 与实际 alpha一致
         labelsOn = labelFade > 0;
 
-        // ---- 绘制 ----
+        // 绘制 
         const stats = renderer.render({
           hoverIdx: P.inter ? P.inter.hoverIdx : -1,
           selectedIdx: P.inter ? P.inter.selectedIdx : -1,
@@ -539,23 +498,17 @@
         });
         lastStats = stats;
 
-        // ---- 交接：这一帧已经画在画布上了，现在可以把 loader 收掉 ----
-        // 必须是【同一帧内】完成，中间不能插一次 rAF，否则会出现
-        // 「loader 已收 / 画面还没出」的那一帧空白。
+        // 避免loader已收但画面还没出的一帧空白
         if (loaderArmed) {
           completeTakeover(revealDurMs > 0 ? `首帧（沉降布局 + ${revealDurMs}ms 淡入）` : '首帧（沉降布局，无淡入）');
           markDirty();
         }
 
-        // LOD 采样必须用【真实帧间隔 elapsed】，不能用 GFI.util.now() - now。
-        //   后者只量到主线程 JS 跑完为止，而 glow 的 drawImage 是纯 fill-rate 开销，
-        //   光栅化在 raster / compositor 线程上 —— 主线程早在 GPU 出图之前就返回了。
-        //   也就是说：最贵的那一环，主线程计时【看不见】。
-        //   elapsed 还顺带覆盖了同帧内其他 rAF 回调（含宿主自己的）占用的时间。
+        // 测帧耗时
         pushFrameTime(elapsed);
         updateLod();
 
-        // ---- 空闲判定 ----
+        // 空闲检测
         const busy = P.sim.isAwake() || P.fx.anyActive() ||
           (P.timeline && P.timeline.playing) ||
           (P.inter && (P.inter.dragNode >= 0 || P.inter.panning)) ||
@@ -600,9 +553,7 @@
       else { acc = 0; startLoop(); }     // 清空累加器，否则后台回来会堆 200 个 substep
     });
 
-    // =======================================================================
     // 公开 API
-    // =======================================================================
     const api = {
       get data() { return P.D; },
       get sim() { return P.sim; },
@@ -764,7 +715,7 @@
       destroy(reason) { destroy(reason); },
     };
 
-    // ---- 销毁 ----
+    // 销毁 
     let destroyed = false;
     function destroy(reason) {
       if (destroyed) return;
@@ -785,31 +736,24 @@
 
     instance = api;
 
-    // ---- 启动 ----
+    // 启动 
     if (nativeMode) {
-      // 用户显式选了原生图谱：原生本来就是主角，loader 绝不能亮
       overlay.setNativeVisible(true);
       overlay.hideLoader();
       syncToolbar();
     } else if (deferTakeover) {
-      // 老路径：数据没到之前让原生图谱继续显示
       overlay.setNativeVisible(true);
       overlay.hideLoader();
       fitView();
       startLoop();
     } else {
-      // 新路径：原生图谱在 mount 那一刻就藏掉了，loader 已经在显示。
-      // boot 是在【数据还没到】的时候跑的，所以 setData 之前循环里画的是空画布
-      // —— 那没关系，loader 盖在上面。
       overlay.setNativeVisible(false);
       fitView();
       startLoop();
     }
     syncToolbar();
 
-    // -----------------------------------------------------------------------
-    // 一键诊断 —— 白屏/看不见时先跑这个
-    // -----------------------------------------------------------------------
+    // 一键诊断
     function diag() {
       const g = GFI.topWin.getComputedStyle;
       const rect = (el) => {
@@ -884,7 +828,7 @@
       const problems = [];
       const notes = [];
 
-      // ---- 致命问题 ----
+      // 致命问题 
       if (!d.我们的canvas.已连接) problems.push('我们的 canvas 未连接 —— overlay 被移除了');
       if (d.root.rect.h < 10) problems.push(`#global-graph 高度 ${d.root.rect.h}px —— 测量塌缩了`);
       if (out.尺寸.cssW < 10) problems.push(`测量宽度仅 ${out.尺寸.cssW}px`);
@@ -895,13 +839,9 @@
       if (d.我们的canvas.css.display === 'none') problems.push('我们的 canvas 是 display:none');
       if (Number(d.我们的canvas.css.opacity) === 0) problems.push('我们的 canvas opacity 为 0');
       if (lastStats && lastStats.total > 200) problems.push(`帧耗时 ${lastStats.total}ms —— 太慢`);
-
-      // 画了 0 个节点才是真问题；耗时全是 0 只是计时精度不足
       if (lastStats && lastStats.nodes === 0 && out.数据.n > 0 && out.数据.可见 > 0) {
         problems.push('视口剔除后节点数为 0 —— 相机可能没对准图谱');
       }
-      // loader 只该在「数据还没到」的那一小段里亮。它一直亮着 = 数据装载失败，
-      // 而原生图谱已经被我们藏掉了 —— 那就是一块空白，必须报出来。
       if (out.交接.加载指示 && out.数据.n > 0 && !out.交接.待交接) {
         problems.push('loader 还亮着但数据已经装载 —— 交接没走到，画面会停在加载态');
       }
@@ -909,7 +849,7 @@
         notes.push('loader 亮着且数据为空 —— 数据还在路上（正常情况下只有几百毫秒）');
       }
 
-      // ---- 非致命说明 ----
+      // 非致命说明 
       if (!out.循环.运行中) {
         if (out.模拟.alpha <= 0.01) {
           notes.push(`渲染循环已空闲停机（帧计数 ${out.循环.帧计数}，alpha=${out.模拟.alpha}）—— 这是【设计行为】，沉降完成后不再空转，有交互会自动唤醒`);
@@ -931,9 +871,7 @@
       return out;
     }
 
-    // -----------------------------------------------------------------------
     // 时间轴内省 —— 排查"按播放没反应"用这个
-    // -----------------------------------------------------------------------
     function tlState() {
       const tl = P.timeline;
       if (!tl) { console.warn('[GFI] 时间轴不存在'); return { 存在: false }; }
@@ -953,18 +891,13 @@
         cutoff: tl.cutoff === Infinity ? 'Infinity' : tl.cutoff,
         进度: +tl.progress().toFixed(4),
         范围: r ? { min: r.min, max: r.max, durationMs: r.duration, 跨度天: Math.round(r.duration / 86400000) } : null,
-        // 🌟 节奏（2026-10-07 按秩推进）——「全程多少秒」现在是算出来的，不是设定值
         有时间戳节点: tl.pacedCount,
         设定节奏_每秒: GFI.config.timeline.revealRate,
         诞生速率_每秒: tl.rate ? +tl.rate.toFixed(2) : 0,
         实际全程秒: tl.playDurationSec ? +tl.playDurationSec.toFixed(1) : 0,
-        // 全程太久时给个可执行的提示（护栏已经全部删掉，节奏完全由用户定，
-        // 所以这里只【说】不动手 —— 「演变节奏」就是那个旋钮）
         全程提示: tl.playDurationSec > 180
           ? `全程 ${(tl.playDurationSec / 60).toFixed(1)} 分钟 —— 嫌久就把「演变节奏」调大（当前 ${GFI.config.timeline.revealRate}/秒）`
           : undefined,
-        // 「密度」的正确度量：同一时刻有几个节点正在做出生动画。
-        //   速率 × 单次动画时长。调「演变节奏」或 pop.mode/maxDuration 都会动它。
         出生缓动模式: GFI.config.pop.mode,
         单次出生动画秒: P.fx && P.fx.popDuration ? +P.fx.popDuration().toFixed(3) : 0,
         同时出生动画数: (P.fx && P.fx.popDuration && tl.rate)
@@ -981,7 +914,7 @@
       return out;
     }
 
-    // 布局分布 dump —— 判断"图谱为什么这么大/这么散"用这个
+    // 布局分布 dump 
     function dump() {
       const Dd = P.D;
       if (!Dd.n) { console.warn('[GFI] 无数据'); return null; }
@@ -1013,7 +946,7 @@
       // 最远的 15 个
       idx.sort((a, b) => dist[b] - dist[a]);
       const far = idx.slice(0, 15).map((i) => ({
-        标签: String(Dd.label[i]).slice(0, 24),
+        标签: String(Dd.label[i]).slice(0, 24),     
         度数: Dd.deg[i],
         类型: Dd.KIND_NAMES[Dd.kind[i]],
         离质心: Math.round(dist[i]),
@@ -1036,7 +969,7 @@
         linkDistance: cfg.physics.linkDistance,
       };
 
-      // 用纯文本输出 —— 对象在控制台里默认折叠，复制粘贴时什么都看不到
+      // 纯文本输出
       const L = [];
       L.push('━━━ 概览 ━━━');
       L.push(`节点 ${summary.节点数}  边 ${summary.边数}  孤立节点 ${summary.孤立节点数}`);
@@ -1062,7 +995,7 @@
         L.push('  ' + String(r.标签).padEnd(26) + String(r.度数).padEnd(6) + r.离质心);
       }
 
-      // 全量清单 —— 用来判断"这些节点到底是不是我的内容"
+      // 全量清单 
       L.push('');
       L.push(`━━━ 全部 ${Dd.n} 个节点（按度数降序）━━━`);
       const all = [];
@@ -1077,11 +1010,11 @@
 
       const ratio = summary.离质心.最大 / Math.max(1, summary.离质心.p50);
       if (ratio > 8) {
-        console.warn(`%c⚠ 最大/中位距离比 = ${ratio.toFixed(1)} —— 有极端离群点把视野撑爆了，看上面「最远的 15 个」`,
+        console.warn(`%c 最大/中位距离比 = ${ratio.toFixed(1)} —— 有极端离群点把视野撑爆了，看上面「最远的 15 个」`,
           'color:#c00;font-weight:bold');
       }
       if (summary.包围盒.宽 > summary.相机可见世界宽度 * 3) {
-        console.warn('%c⚠ 图谱宽度是相机可见宽度的 3 倍以上 —— 视野没对准（自动适配应该会修好）',
+        console.warn('%c 图谱宽度是相机可见宽度的 3 倍以上 —— 视野没对准（自动适配应该会修好）',
           'color:#c00;font-weight:bold');
       }
       return { summary, far, byDeg };
@@ -1125,21 +1058,14 @@
         setLod: (n) => api.setLod(n),
         native: (b) => api.setNativeMode(b),
         demo: (n) => { const d = GFI.DataSource.demo(n || 400, {}); api.setData(d.nodes, d.links); },
-
-        // ---- 进图谱时序 ----
-        /** 打印「原生图谱 → 我们的画布 → 视角适配」三段的客观时间戳 */
         timeline: () => GFI.Overlay.printEvents(),
         timelineClear: () => GFI.Overlay.clearEvents(),
-
-        // ---- 布局预热 ----
-        /** 预热器状态：有没有现成的布局缓存、最近一次跑了多久多少 tick */
+        // 布局预热 
         warm: () => (GFI.Warm ? GFI.Warm.state() : null),
-        /** 手动重跑一次预热（改完布局参数后想立刻验证"打开即最终形态"就用它） */
         prewarm: () => (GFI.Warm ? GFI.Warm.prewarm({
           source: (cfg.runtime||{}).dataSource, demoCount: (cfg.runtime||{}).demoCount,
           log: (m) => console.log('[GFI]', m),
         }) : null),
-        /** 丢掉预热缓存（下次进图谱会即时沉降，用来做 A/B 对照） */
         unwarm: () => { if (GFI.Warm) GFI.Warm.invalidate('__GFI__.unwarm()'); return true; },
       };
     } catch (e) {}
@@ -1168,9 +1094,9 @@
     });
     if (st) console.log('上一帧耗时:', st);
     const ratio = s.p50LinkLen / GFI.config.physics.linkDistance;
-    if (ratio < 1.2) console.log('%c→ p50 边长偏短，把 charge 调小一点（更负）或 linkDistance 调大', 'color:#c80');
-    else if (ratio > 1.6) console.log('%c→ p50 边长偏长，把 charge 调大（更接近 0）', 'color:#c80');
-    else console.log('%c✔ p50 边长落在 1.2~1.6 × linkDistance，达标', 'color:#0a0');
+    if (ratio < 1.2) console.log('%c→ p50 边长偏短，把 charge 调小一点或 linkDistance 调大', 'color:#c80');
+    else if (ratio > 1.6) console.log('%c→ p50 边长偏长，把 charge 调大', 'color:#c80');
+    else console.log('%c✔ p50 边长落在 1.2~1.6 × linkDistance,达标', 'color:#0a0');
     return { ...s, frame: st };
   };
 

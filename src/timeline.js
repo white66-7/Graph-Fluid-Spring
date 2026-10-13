@@ -11,12 +11,12 @@
 
     const range = GFI.Data.timeRange(D);  // 时间范围对象
 
-    const tl = { 
+    const tl = {
       range,  // 时间戳
       cutoff: range ? range.max : Infinity,   // 当前时刻
-      playing: false, 
+      playing: false,
       speed: 1,           // 倍速
-      speedIdx: 1, 
+      speedIdx: 1,
       rank: 0,            // 秩
       rate: 0,            // 节点/秒
       pacedCount: 0,      // 有时间戳的节点数
@@ -35,7 +35,7 @@
 
 
     //   revealSlot[p] pass A当本帧子节点计数，pass B当槽位游标
-    const revealSlot = new Int32Array(D.n);    
+    const revealSlot = new Int32Array(D.n);
     const parentOf = new Int32Array(D.n);
     //   GOLDEN = 黄金角 137.5°
     const GOLDEN = Math.PI * (3 - Math.sqrt(5));
@@ -144,60 +144,87 @@
 
     // parentIdx / slot 由 setCutoff 的两趟扫描传入 - pass A计数、pass B发射
     function anchorFor(i, visCentroid, parentIdx, slot) {
-      // Obsidian 模式 —— 落在存在邻居的平均位置 ± 随机撒布。
-      if (obsidianMode) {
-        const s = D.adjStart[i], e = D.adjStart[i + 1];
-        let cx = 0, cy = 0, k = 0;
+      // 算可见邻居的质心和最大半径
+      const s = D.adjStart[i], e = D.adjStart[i + 1];
+      let cx = 0, cy = 0, k = 0;
+      for (let p = s; p < e; p++) {
+        const j = D.adjList[p];
+        if (!D.visible[j]) continue;
+        cx += D.x[j]; cy += D.y[j]; k++;
+      }
+
+      // 有可见邻居
+      if (k > 0) {
+        cx /= k; cy /= k;
+
+        let maxR = 0;
         for (let p = s; p < e; p++) {
           const j = D.adjList[p];
           if (!D.visible[j]) continue;
-          cx += D.x[j]; cy += D.y[j]; k++;
+          const d = Math.hypot(D.x[j] - cx, D.y[j] - cy);
+          if (d > maxR) maxR = d;
         }
-        if (k > 0) {
-          const spread = 0.12 * cfg.physics.linkDistance * Math.sqrt(Math.max(1, revealBatch));
+
+        // 远离全图质心 + 黄金角错开兄弟
+        let baseAngle;
+        if (visCentroid && visCentroid.k > 0) {
+          const dxc = cx - visCentroid.x, dyc = cy - visCentroid.y;
+          const dc = Math.hypot(dxc, dyc);
+          baseAngle = dc > 1e-3 ? Math.atan2(dyc, dxc) : jitter(i, 60, Math.PI);
+        } else {
+          baseAngle = jitter(i, 60, Math.PI);
+        }
+        const angle = baseAngle + (slot >= 0 ? slot * GOLDEN * 0.5 : 0) + jitter(i, 31, 0.2);
+        const dirX = Math.cos(angle);
+        const dirY = Math.sin(angle);
+
+        if (obsidianMode) {
+          // 落在 hub 族外围
+          const margin = cfg.physics.linkDistance * 0.8;   // 约 40
+          const dist = maxR + margin + jitter(i, 61, 20);
           return {
             parentIdx: -1,
-            x: cx / k + jitter(i, 51, spread),
-            y: cy / k + jitter(i, 52, spread),
-            dirX: 0, dirY: 0,
+            x: cx + dirX * dist,
+            y: cy + dirY * dist,
+            dirX: -dirX,
+            dirY: -dirY,
+          };
+        } else {
+          // spring：紧贴母体 3px
+          const px = D.x[parentIdx];
+          const py = D.y[parentIdx];
+          return {
+            parentIdx,
+            x: px + dirX * 3.0,
+            y: py + dirY * 3.0,
+            dirX,
+            dirY,
           };
         }
       }
 
-      // 存在母节点 —— 紧贴母节点向外侧爆破喷射
-      if (parentIdx !== -1) {
-        const px = D.x[parentIdx];
-        const py = D.y[parentIdx];
-
-        // 基础方向
-        const cx = visCentroid && visCentroid.k > 0 ? visCentroid.x : px;
-        const cy = visCentroid && visCentroid.k > 0 ? visCentroid.y : py;
-        let angle = Math.atan2(py - cy, px - cx);
-
-        if (Math.abs(px - cx) < 1e-3 && Math.abs(py - cy) < 1e-3) {
-          angle = jitter(i, 30, Math.PI);
-          angle += slot * GOLDEN;
+      // 无母节点的孤立节点
+      if (visCentroid && visCentroid.k > 0) {
+        // 算全图包围盒
+        const bounds = GFI.Data.bounds(D, true);
+        let outerR;
+        if (!bounds.empty) {
+          const cx = (bounds.minX + bounds.maxX) * 0.5;
+          const cy = (bounds.minY + bounds.maxY) * 0.5;
+          outerR = Math.max(
+            bounds.maxX - cx,
+            cx - bounds.minX,
+            bounds.maxY - cy,
+            cy - bounds.minY
+          );
         } else {
-          angle += slot * GOLDEN + jitter(i, 31, 0.25);
+          outerR = cfg.physics.linkDistance * 2.2;
         }
 
-        const dirX = Math.cos(angle);
-        const dirY = Math.sin(angle);
-
-        // 偏移 3 像素出生
-        return {
-          parentIdx,
-          x: px + dirX * 3.0,
-          y: py + dirY * 3.0,
-          dirX,
-          dirY,
-        };
-      }
-
-      // 无母节点的孤立节点 —— 从外圈向内滑入
-      if (visCentroid && visCentroid.k > 0) {
         const angle = jitter(i, 32, Math.PI);
-        const dist = cfg.physics.linkDistance * 2.2 + jitter(i, 33, 40);
+        const margin = cfg.physics.linkDistance * 0.8;   
+        const dist = outerR + margin + jitter(i, 33, 20);
+
         return {
           parentIdx: -1,
           x: visCentroid.x + Math.cos(angle) * dist,
@@ -207,7 +234,7 @@
         };
       }
 
-      // 初始创世节点
+      // 创世节点 
       const angle = jitter(i, 34, Math.PI);
       const r = 20 + jitter(i, 35, 30);
       return {
@@ -222,9 +249,9 @@
     // 设置 cutoff
     tl.setCutoff = function setCutoff(ms, opts) {
       opts = opts || {};
-      const prevCutoff = opts.prevCutoff !== undefined ? opts.prevCutoff : tl.cutoff; 
-      const budget = (opts.revealBudget === undefined) ? Infinity : opts.revealBudget;  
-      const instantHide = !!opts.instantHide; 
+      const prevCutoff = opts.prevCutoff !== undefined ? opts.prevCutoff : tl.cutoff;
+      const budget = (opts.revealBudget === undefined) ? Infinity : opts.revealBudget;
+      const instantHide = !!opts.instantHide;
 
       const changed = GFI.Data.applyCutoff(D, ms);
       tl.cutoff = ms;
@@ -380,7 +407,7 @@
 
       const o = {
         forward: true, prevCutoff: prev, viewportWorldHeight, playing: true,
-        rank,                       
+        rank,
       };
       if (cfg.timeline.burstSmoothing !== false) {
         o.revealBudget = Math.max(1, Math.ceil(step));

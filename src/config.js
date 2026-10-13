@@ -8,12 +8,12 @@
     physics: {
       charge: -0.12,          // 整体疏密
       chargeFalloff: 0,       // 
-      chargeDegGain: 0.5,     // 斥力随度数增长
-      chargeDegCap: 8,        // 倍率上限
+      chargeDegGain: 0.2,     // 斥力随度数增长
+      chargeDegCap: 4,        // 倍率上限
       distanceMin: 16,        // 软化近距奇点
       distanceMax: 420,       // 斥力截断半径
       linkDistance: 50,
-      linkStrength: 0.3,      // 边刚度
+      linkStrength: 0.5,      // 边刚度
       velocityRetain: 0.60,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
       collideStrength: 1.0,   // 重叠消解强度（1 = d3 forceCollide 约定：每遍完全解消）
@@ -27,12 +27,15 @@
       // 🌟 2（原 3）：向心压缩减 1/3。gravity 是唯一把图谱往一起收的力，
       //   减弱它 = 团簇之间松开 = 分布更均匀。
       gravityDeadzone: 40,    // 死区半径
-      gravity: 2,             // 向心恒力
+      gravity: 4,             // 向心恒力
+      gravityDegGain: 0.5,
       centerStrength: 0.02,   // 刚性回正
       alphaMin: 0.001,
       collideCell: 48,        // 碰撞微网格边长（容纳放大后的 hub 节点）
 
-      // 零度节点（无连边）锚定外圈环
+      hubLinkThreshold: 5,   // hub边际
+      hubLinkBoost: 3,       // hub-hub 边刚度倍率
+      // 零度节点
       isolatedRing: {
         enabled: true,
         factor: 1.18,
@@ -40,7 +43,7 @@
       },
     },
 
-    // 重热幅度(alpha)
+    // 重热幅度
     reheat: {
       dataChange: 0.6,
       cutoff: 0.45,
@@ -205,7 +208,7 @@
       labelOverlapDim: 0.35,
       // 0为不截断,设成正数则超过该字数后续 …
       labelMaxChars: 0,
-      labelFont: '12px ui-sans-serif, -apple-system, "Segoe UI", sans-serif',
+      labelFont: '8px ui-sans-serif, -apple-system, "Segoe UI", sans-serif',
       labelColor: '#d9e2f0',
       labelColorDim: 'rgba(217,226,240,0.45)',
       labelColorHi: '#ffffff',
@@ -344,7 +347,7 @@
     language: () => '中文',
   };
 
-  
+
   const i18n = GFI.i18n;
   if (!i18n) {
     console.error('[GFI] src/i18n.js 未加载 —— 检查 index.html 的脚本顺序');
@@ -358,7 +361,7 @@
   GFI.SCHEMA_BINDINGS = SCHEMA_BINDINGS;
 
   // 日记标签默认关闭
-  GFI.CFG_VERSION = 16;
+  GFI.CFG_VERSION = 17;
 
   const SANE_RANGE = {
     charge: (v) => v <= 0 && v >= -5,
@@ -404,11 +407,11 @@
 
     // 语言 
     if (GFI.i18n) {
-      const langCode = GFI.i18n.set(s.language);         
+      const langCode = GFI.i18n.set(s.language);
       const idx = GFI.i18n.LANGS.indexOf(langCode);
       const canonical = GFI.i18n.ENUM_CHOICES[idx >= 0 ? idx : 0];
       if (s.language !== canonical) {
-        s.language = canonical;                      
+        s.language = canonical;
         try {
           if (typeof window !== 'undefined' && window.logseq && window.logseq.updateSettings) {
             window.logseq.updateSettings({ language: canonical });

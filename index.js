@@ -1,8 +1,6 @@
-/*
- *   注册设置面板、同步设置
- *   监听 #global-graph 出现/消失并挂载/拆卸渲染器
- *   把节点点击跳转 Logseq页面
- */
+//  注册设置面板、同步设置
+//  监听 #global-graph 出现/消失并挂载/拆卸渲染器
+//  把节点点击跳转 Logseq页面
 (function () {
   'use strict';
 
