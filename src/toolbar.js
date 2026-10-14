@@ -150,5 +150,12 @@
     return api;
   }
 
-  GFI.Toolbar = { create, fmtDate };
+  function createNull() {
+    return {
+      setPlaying() {}, setProgress() {}, setLabel() {}, setKinds() {},
+      setTimeTravelAvailable() {}, fmtDate, destroy() {},
+    };
+  }
+
+  GFI.Toolbar = { create, createNull, fmtDate };
 })(window.GFI);

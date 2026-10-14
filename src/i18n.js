@@ -1,10 +1,14 @@
-  /* 设置面板的中英文双语 */
+/* 设置面板的中英文双语 */
 (function (GFI) {
   'use strict';
   if (GFI.i18n) return;
 
   const LANGS = ['zh', 'en'];
   const DEFAULT_LANG = 'zh';
+
+  // 节奏档位
+  const RATE_CHOICES = ['慢', '快'];
+  const RATE_VALUES = { '慢': 0.5, '快': 1.0 };
 
   // 映射
   const ENUM_CHOICES = ['中文', 'English'];
@@ -37,235 +41,207 @@
 
 
   const SCHEMA = [
-      {
-        key: 'language',
-        type: 'enum',
-        enumChoices: ['中文', 'English'],
-        enumPicker: 'radio',
-        title: { zh: '界面语言 / Language', en: 'Language' },
-        short: {
-          zh: '面板语言',
-          en: 'Panel language',
-        },
-        default: '中文',
+    {
+      key: 'language',
+      type: 'enum',
+      enumChoices: ['中文', 'English'],
+      enumPicker: 'radio',
+      title: { zh: '界面语言 / Language', en: 'Language' },
+      short: {
+        zh: '面板语言',
+        en: 'Panel language',
       },
-      {
-        key: 'hideClassIdents',
-        type: 'string',
-        input: 'textarea',
-        title: { zh: '自定义过滤类', en: 'Custom Excluded Classes' },
-        short: {
-          zh: '默认隐藏 Code、Page、Journal 等无查询意义的节点。\n' +
-            '若想显示，请删除下方相关名称；\n' +
-            '若想隐藏系统类，请查阅 Logseq 相关文档；\n' +
-            '若想隐藏自定义类，请按照格式输入相关名称。',
-          en: 'By default hides meaningless query nodes such as Code, Page, Journal.\n' +
-            'To show them, delete the corresponding names below;\n' +
-            'To hide system classes, see the Logseq documentation;\n' +
-            'To hide custom classes, enter names in the format shown.',
-        },
-        default: '',
+      default: '中文',
+    },
+    {
+      key: 'hideClassIdents',
+      type: 'string',
+      input: 'textarea',
+      title: { zh: '自定义过滤类', en: 'Custom Excluded Classes' },
+      short: {
+        zh: '默认隐藏 Code、Page、Journal 等无查询意义的节点。\n' +
+          '若想显示，请删除下方相关名称；\n' +
+          '若想隐藏系统类，请查阅 Logseq 相关文档；\n' +
+          '若想隐藏自定义类，请按照格式输入相关名称。',
+        en: 'By default hides meaningless query nodes such as Code, Page, Journal.\n' +
+          'To show them, delete the corresponding names below;\n' +
+          'To hide system classes, see the Logseq documentation;\n' +
+          'To hide custom classes, enter names in the format shown.',
       },
-      {
-        key: 'hideNames',
-        type: 'string',
-        input: 'textarea',
-        title: { zh: '自定义过滤名称', en: 'Custom Excluded Names' },
-        short: {
-          zh: '节点显示黑名单',
-          en: 'Node display blacklist',
-        },
-        default: '',
+      default: '',
+    },
+    {
+      key: 'hideNames',
+      type: 'string',
+      input: 'textarea',
+      title: { zh: '自定义过滤名称', en: 'Custom Excluded Names' },
+      short: {
+        zh: '节点显示黑名单',
+        en: 'Node display blacklist',
       },
-      {
-        key: 'charge',
-        type: 'number',
-        title: { zh: '斥力强度', en: 'Repulsion' },
-        short: {
-          zh: '节点之间的排斥力，决定整体疏密',
-          en: 'Repulsion between nodes; controls overall spread.',
-        },
-        default: -0.12,
+      default: '',
+    },
+    {
+      key: 'labelYield',
+      type: 'boolean',
+      title: { zh: '标签重叠时让位', en: 'Hide Overlapping Labels' },
+      short: {
+        zh: '关：允许重叠；开：重叠的互相让位',
+        en: 'Off: allow overlap; On: overlaps yield',
       },
-      {
-        key: 'linkDistance',
-        type: 'number',
-        title: { zh: '连线长度', en: 'Link Distance' },
-        short: {
-          zh: '相连节点间的静止距离',
-          en: 'Resting distance between connected nodes',
-        },
-        default: 50,
+      default: false,
+    },
+    {
+      key: 'labelJournal',
+      type: 'boolean',
+      title: { zh: '显示日记名字', en: 'Journal Labels' },
+      short: {
+        zh: '日记节点是否显示名字',
+        en: 'Show names on journal nodes',
       },
-      {
-        key: 'timelapseRate',
-        type: 'number',
-        title: { zh: '时间旅行节奏', en: 'Timelapse Rate' },
-        short: {
-          zh: '越小节点出现越慢越缓，设置 0 按照自动化公式',
-          en: 'Lower = slower reveal; 0 = auto formula',
-        },
-        default: 0.5,
+      default: false,
+    },
+    {
+      key: 'timelapseRate',
+      type: 'enum',
+      enumChoices: ['slow', 'fast'],
+      enumPicker: 'radio',
+      title: { zh: '时间旅行节奏', en: 'Timelapse Rate' },
+      short: {
+        zh: '节点出现快慢',
+        en: 'Node reveal speed',
       },
-      {
-        key: 'labelMaxRatio',
-        type: 'number',
-        title: { zh: '标签密度', en: 'Label Density' },
-        short: {
-          zh: '显示多少比例节点名称(1 = 全部)',
-          en: 'Fraction of nodes eligible to show a name (1 = all)',
-        },
-        default: 1,
+      default: 'slow',
+    },
+    {
+      key: 'charge',
+      type: 'number',
+      title: { zh: '斥力强度', en: 'Repulsion' },
+      short: {
+        zh: '节点之间的排斥力，决定整体疏密',
+        en: 'Repulsion between nodes; controls overall spread.',
       },
-      {
-        key: 'labelJournal',
-        type: 'boolean',
-        title: { zh: '显示日记名字', en: 'Journal Labels' },
-        short: {
-          zh: '日记节点是否显示名字',
-          en: 'Show names on journal nodes',
-        },
-        default: false,
+      default: -0.12,
+    },
+    {
+      key: 'linkDistance',
+      type: 'number',
+      title: { zh: '连线长度', en: 'Link Distance' },
+      short: {
+        zh: '相连节点间的静止距离',
+        en: 'Resting distance between connected nodes',
       },
-      {
-        key: 'labelYield',
-        type: 'boolean',
-        title: { zh: '标签重叠时让位', en: 'Hide Overlapping Labels' },
-        short: {
-          zh: '关：允许重叠；开：重叠的互相让位',
-          en: 'Off: allow overlap; On: overlaps yield',
-        },
-        default: false,
+      default: 50,
+    },
+    {
+      key: 'labelMaxRatio',
+      type: 'number',
+      title: { zh: '标签密度', en: 'Label Density' },
+      short: {
+        zh: '显示多少比例节点名称(1 = 全部)',
+        en: 'Fraction of nodes eligible to show a name (1 = all)',
       },
-      {
-        key: 'nodeSize',
-        type: 'number',
-        title: { zh: '节点大小', en: 'Node Size' },
-        short: {
-          zh: '节点圆点的大小倍率',
-          en: 'Scale of node dots',
-        },
-        default: 1,
+      default: 1,
+    },
+    {
+      key: 'nodeSize',
+      type: 'number',
+      title: { zh: '节点大小', en: 'Node Size' },
+      short: {
+        zh: '节点圆点的大小倍率',
+        en: 'Scale of node dots',
       },
-      {
-        key: 'prewarm',
-        type: 'boolean',
-        title: { zh: '后台预热布局', en: 'Prewarm Layout in Background' },
-        short: {
-          zh: '插件加载后在后台把力导向跑到沉降，进图谱第一帧就是最终形态',
-          en: 'Settle in the background; final on first paint',
-        },
-        default: true,
+      default: 1,
+    },
+    {
+      key: 'prewarm',
+      type: 'boolean',
+      title: { zh: '后台预热布局', en: 'Prewarm Layout in Background' },
+      short: {
+        zh: '插件加载后在后台把力导向跑到沉降，进图谱第一帧就是最终形态',
+        en: 'Settle in the background; final on first paint',
       },
-      {
-        key: 'syncSettleMs',
-        type: 'number',
-        title: { zh: '进图谱时同步抢跑上限 (ms)', en: 'Sync Settle Budget (ms)' },
-        short: {
-          zh: '加载指示后面把沉降一次跑完的时间上限',
-          en: 'Time budget to finish settling behind the loading indicator',
-        },
-        default: 300,
+      default: true,
+    },
+    {
+      key: 'syncSettleMs',
+      type: 'number',
+      title: { zh: '进图谱时同步抢跑上限 (ms)', en: 'Sync Settle Budget (ms)' },
+      short: {
+        zh: '加载指示后面把沉降一次跑完的时间上限',
+        en: 'Time budget to finish settling behind the loading indicator',
       },
-      {
-        key: 'revealAnimMs',
-        type: 'number',
-        title: { zh: '图谱显现淡入', en: 'Reveal Fade-in' },
-        short: {
-          zh: '加载指示后节点显现时一次淡入时长，0 = 直接跳出',
-          en: 'Fade-in duration when the graph appears; 0 = instant',
-        },
-        default: 320,
+      default: 300,
+    },
+    {
+      key: 'revealAnimMs',
+      type: 'number',
+      title: { zh: '图谱显现淡入', en: 'Reveal Fade-in' },
+      short: {
+        zh: '加载指示后节点显现时一次淡入时长，0 = 直接跳出',
+        en: 'Fade-in duration when the graph appears; 0 = instant',
       },
-      {
-        key: 'velocityRetain',
-        type: 'number',
-        title: { zh: '速度保留率', en: 'Velocity Retain' },
-        short: {
-          zh: '每帧保留多少速度。越低收敛越快、手感越"重"',
-          en: 'Velocity kept each frame. Lower = converges faster and feels heavier',
-        },
-        default: 0.6,
+      default: 320,
+    },
+    {
+      key: 'velocityRetain',
+      type: 'number',
+      title: { zh: '速度保留率', en: 'Velocity Retain' },
+      short: {
+        zh: '每帧保留多少速度。越低收敛越快、手感越"重"',
+        en: 'Velocity kept each frame. Lower = converges faster and feels heavier',
       },
-      {
-        key: 'settleTicks',
-        type: 'number',
-        title: { zh: '活跃时长', en: 'Settle Duration' },
-        short: {
-          zh: '开始布局到完全静止经过多少帧',
-          en: 'Frames from layout start to full rest',
-        },
-        default: 400,
+      default: 0.6,
+    },
+    {
+      key: 'settleTicks',
+      type: 'number',
+      title: { zh: '活跃时长', en: 'Settle Duration' },
+      short: {
+        zh: '开始布局到完全静止经过多少帧',
+        en: 'Frames from layout start to full rest',
       },
-      {
-        key: 'linkBoost',
-        type: 'number',
-        title: { zh: '拖动带动邻域', en: 'Neighbour Pull' },
-        short: {
-          zh: '拖动节点时邻居跟随的程度',
-          en: 'How strongly neighbours follow a dragged node',
-        },
-        default: 16,
+      default: 400,
+    },
+    {
+      key: 'linkBoost',
+      type: 'number',
+      title: { zh: '拖动带动邻域', en: 'Neighbour Pull' },
+      short: {
+        zh: '拖动节点时邻居跟随的程度',
+        en: 'How strongly neighbours follow a dragged node',
       },
-      {
-        key: 'releaseAlpha',
-        type: 'number',
-        title: { zh: '松手停位', en: 'Drop Firmness' },
-        short: {
-          zh: '松手后节点活跃度。低则停在放下处；高会被拉回原位',
-          en: 'Activity after release. Lower = stays where dropped; higher = pulled back',
-        },
-        default: 0.05,
+      default: 16,
+    },
+    {
+      key: 'releaseAlpha',
+      type: 'number',
+      title: { zh: '松手停位', en: 'Drop Firmness' },
+      short: {
+        zh: '松手后节点活跃度。低则停在放下处；高会被拉回原位',
+        en: 'Activity after release. Lower = stays where dropped; higher = pulled back',
       },
-      {
-        key: 'popAmp',
-        type: 'number',
-        title: { zh: '节点弹出幅度', en: 'Pop Overshoot' },
-        short: {
-          zh: '新节点出现时向外过冲幅度',
-          en: 'Overshoot when a new node appears',
-        },
-        default: 0.55,
-      },
-      {
-        key: 'popZeta',
-        type: 'number',
-        title: { zh: '弹出阻尼比', en: 'Pop Damping' },
-        short: {
-          zh: '回弹次数',
-          en: 'Number of bounces',
-        },
-        default: 0.3,
-      },
-      {
-        key: 'shockMagnitude',
-        type: 'number',
-        title: { zh: '时间波强度', en: 'Shockwave' },
-        short: {
-          zh: '向外扩散的斥力波强度，0：完全关闭',
-          en: 'Outward repulsion wave strength; 0 = disabled',
-        },
-        default: 0,
-      },
-    ];
+      default: 0.05,
+    },
+  ];
 
   /**
    * 把文案表编译成 Logseq 的 schema
    * @param {object[]} [entries] 
    */
-    function schema(entries) {
-      const src = entries || SCHEMA;
-      return src.map((e) => {
-        const out = {};
-        for (const k in e) {
-          if (k === 'title') out.title = t(e.title);
-          else if (k === 'short') { /* 不直接进 schema */ }
-          else out[k] = e[k];
-        }
-        out.description = t(e.short);
-        return out;
-      });
+  function schema(entries) {
+    const src = entries || SCHEMA;
+    return src.map((e) => {
+      const out = {};
+      for (const k in e) {
+        if (k === 'title') out.title = t(e.title);
+        else if (k === 'short') { /* 不直接进 schema */ }
+        else out[k] = e[k];
       }
+      out.description = t(e.short);
+      return out;
+    });
+  }
 
   function audit(entries) {
     const src = entries || SCHEMA;
@@ -365,7 +341,7 @@
   }
 
   GFI.i18n = {
-    t, set, get, normalize, schema, audit, SCHEMA, LANGS, DEFAULT_LANG, ENUM_CHOICES,
+    t, set, get, normalize, schema, audit, SCHEMA, LANGS, DEFAULT_LANG, ENUM_CHOICES,RATE_CHOICES, RATE_VALUES,
     relabelPanel, norm, inSettingsPanel, hasInteractive,
   };
 })(window.GFI = window.GFI || {});

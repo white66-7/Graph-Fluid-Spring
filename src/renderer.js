@@ -1,24 +1,5 @@
-/*
- * GFI.Renderer — Canvas2D 绘制
- * ===========================================================================
- * 性能铁律（违反任何一条都会掉到 10fps 以下）：
- *
- *   1. 【绝不用 shadowBlur】—— 它是 Chromium Canvas2D 里每次绘制的 CPU 高斯模糊，
- *      比普通填充慢 30~100×。3000 节点下是 3ms 和 300ms 的差别。
- *      辉光改用预渲染的离屏径向渐变精灵 + 'lighter' 混合。
- *
- *   2. 【不用 Path2D】—— 它没有 clear()，每帧都得新建 = 每帧分配。
- *      用 ctx.beginPath()/moveTo/lineTo + 单次 stroke()，零分配且一样快。
- *
- *   3. 【ctx 始终留在屏幕空间】—— 不做 ctx.scale(k,k) 的世界变换。
- *      那会缩放线宽（0.15px 的边直接消失），还会逼着字号和精灵尺寸走变换。
- *      12000 个端点换算约 0.1ms，换来对线宽/字号/精灵分桶的完全控制。
- *
- *   4. 【绝不每帧拼 rgba(...) 字符串】—— 用 ctx.globalAlpha 存浮点。
- *
- * 绘制顺序（Obsidian 是边在节点下面）：
- *   清屏 → 剔除 → 辉光(lighter) → 边 → 节点头 → 标签 → 覆盖层
- */
+// Canvas2D 绘制
+// 清屏 → 剔除 → 辉光(lighter) → 边 → 节点头 → 标签 → 覆盖层
 (function (GFI) {
   'use strict';
   if (GFI.Renderer) return;
@@ -37,7 +18,7 @@
     let W = 1, H = 1;                 // CSS 像素尺寸
     let bgColor = rcfg.bgFallback;
 
-    // 预分配绘制表
+    // 所有可见节点的索引
     let nodeList = new Int32Array(Math.max(64, D.n));
     let edgeList = new Int32Array(Math.max(64, D.m));
     let nodeCount = 0, edgeCount = 0;
@@ -274,32 +255,28 @@
     function invalidateSprites() {
       spriteCache.clear();
       labelCache.clear();
-      refreshLabelMetrics();     // labelFont / haloWidth / dpr 都可能变了
-      // 🌟 字号/ halo 变了 → 标签包围盒全变 → 占位与渐变状态整体作废
+      refreshLabelMetrics(); 
       labelA.fill(0, 0, D.n);
       labelShown.fill(0, 0, D.n);
       labelWon.fill(0, 0, D.n);
       lblInit = false;
     }
 
-    // -----------------------------------------------------------------------
-    // 剔除
-    // -----------------------------------------------------------------------
+    // 挑出视口内显示的节点和边
     function cull(extraMargin) {
+      // 视口外扩多少像素
       cam.visibleRect(extraMargin, rect);
       const grid = cullGrid;
+      // 有网格时
       if (grid && grid.cols) {
+        // 找出落在某个矩形范围内的所有节点
         nodeCount = grid.collectRect(D, rect.x0, rect.y0, rect.x1, rect.y1, nodeList, D.visible);
       } else {
         nodeCount = 0;
+        // nodeList 
         for (let i = 0; i < D.n; i++) if (D.visible[i]) nodeList[nodeCount++] = i;
       }
 
-      // 边：线段包围盒与视口求交。
-      // ⚠ 不要用「两端都在视口内」——放大或图谱较大时，大量边都有一端在视口外，
-      //   那条件会把它们全丢掉，看起来就是"连线不见了"。
-      // 可见性直接查 visible[]：D.lvisible 只在 build 时写过一次、之后没人维护，
-      //   拿它判断会让已隐藏节点的边残留（时间轴擦除时尤其明显）。
       const { lsrc, ltgt, x, y, visible } = D;
       edgeCount = 0;
       const cap = edgeList.length;
@@ -310,46 +287,50 @@
         if ((sx < rect.x0 && tx < rect.x0) || (sx > rect.x1 && tx > rect.x1)) continue;
         if ((sy < rect.y0 && ty < rect.y0) || (sy > rect.y1 && ty > rect.y1)) continue;
         if (edgeCount >= cap) break;
+        // 以节点数当索引
         edgeList[edgeCount++] = e;
       }
     }
 
-    // -----------------------------------------------------------------------
     // 主绘制
-    // -----------------------------------------------------------------------
     /**
      * @param {object} view { hoverIdx, selectedIdx, lod, labelsOn }
      */
     function render(view) {
       const t0 = GFI.util.now();
 
+      // 重置画布状态
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
-      ctx.clearRect(0, 0, W, H);      // 背景靠 canvas 的 CSS background，省掉全屏 fillRect
 
+      // 混合模式 - 新内容盖在旧内容上
+      ctx.globalCompositeOperation = 'source-over';
+      // 全局透明度
+      ctx.globalAlpha = 1;
+
+      // 清屏
+      ctx.clearRect(0, 0, W, H);  
       if (!D.n) return { cull: 0, total: GFI.util.now() - t0 };
 
-      // 剔除余量要容得下【辉光】，而不是只容下节点本体：辉光以节点为中心向外
-      // 摊开 spread × rScreen（见 drawGlow 的 half），而 pop 期间 scaleMul 还能到
-      // 1 + pop.amp。只留 radiusMax + 16 的话，贴着视口边缘的节点会在边缘上
-      // "啪"地亮起来 —— 因为画布每帧清屏，边缘外的辉光就是没画。
-      cull(rcfg.radiusMax * rcfg.nodeSize * (1 + GFI.config.pop.amp) * rcfg.glowSpread + 16);
+      cull(rcfg.radiusMax * rcfg.nodeSize * rcfg.glowSpread + 16);
       const tCull = GFI.util.now();
 
+      // 鼠标悬浮的节点
       const hoverIdx = view.hoverIdx | 0;
+      // 选中的节点
       const selectedIdx = view.selectedIdx | 0;
       const hot = hoverIdx >= 0 ? hoverIdx : selectedIdx;
+      // lod 挡位
       const lod = clamp(view.lod | 0, 0, GFI.config.lod.levels.length - 1);
+
       const lodCfg = GFI.config.lod.levels[lod];
       const k = cam.k;
 
       drawEdges(hot, k);
       const tEdges = GFI.util.now();
-
+      // 画辉光
       drawGlow(nodeList, nodeCount, lodCfg, k, hoverIdx, selectedIdx);
       const tGlow = GFI.util.now();
-
+      // 画节点头
       drawCores(nodeList, nodeCount, k, lodCfg, hoverIdx);
       const tCore = GFI.util.now();
 
@@ -361,9 +342,11 @@
       labelFadeMul = lf === undefined ? 1 : (lf > 0 ? (lf < 1 ? +lf : 1) : 0);
       const fadeRising = labelFadeMul > 0 && lblPrevFade <= 0;
       lblPrevFade = labelFadeMul;
+      //  画标签
       if (view.labelsOn && labelFadeMul > 0) drawLabels(nodeList, nodeCount, lodCfg, k, hot, fadeRising);
       const tLabel = GFI.util.now();
 
+      // 画 hover高亮
       drawOverlay(hoverIdx, selectedIdx, k, lodCfg);
       const tEnd = GFI.util.now();
 
@@ -376,12 +359,10 @@
         total: +(tEnd - t0).toFixed(3),
         nodes: nodeCount,
         edgesN: edgeCount,
-        // labelN = 本帧真正画出的标签数（被占位格挡掉的不计）；
-        // labelCacheN = 精灵缓存条目数。稳定后这个数应该收敛不动 ——
-        // 若它每帧都在涨，说明缓存 key 或失效逻辑坏了。
+        // 不计被占位格挡掉的标签数
         labelN: labelDrawn,
+        // 精灵缓存条目数
         labelCacheN: labelCache.size,
-        // 排查"连线看不见"用：hot >= 0 时大部分边会被压到 edgeColorDim
         hot: hot,
         边色: hot < 0 ? rcfg.edgeColor : rcfg.edgeColorHi,
         压暗色: rcfg.edgeColorDim,
@@ -491,10 +472,7 @@
       drawFadingEdges(fn, wNormal, wHi);
     }
 
-    // -----------------------------------------------------------------------
-    // 辉光：预渲染精灵 + 'lighter' 累加
-    // Obsidian 的 bloom 就是这么来的 —— 重叠处自然叠加变亮，白送
-    // -----------------------------------------------------------------------
+    // 辉光
     function drawGlow(list, count, lodCfg, k, hoverIdx, selectedIdx) {
       if (lodCfg.glow === 'hover' && hoverIdx < 0 && selectedIdx < 0) return;
 
@@ -503,6 +481,7 @@
       const spread = rcfg.glowSpread;
       const minScale = lodCfg.glowMinScale;
 
+      // 新旧内容相加
       ctx.globalCompositeOperation = 'lighter';
       let lastIdx = -1;
       let sprite = null;
@@ -511,8 +490,13 @@
         const i = list[p];
         if (!visible[i]) continue;
         const a = renderAlpha[i];
+        // 几乎透明
         if (a <= 0.01) continue;
+
+        // 缩放过小
         if (k < minScale) continue;
+
+        // 度数 < 2 不给辉光
         if (lodCfg.glow === 'deg2' && deg[i] < 2) continue;
         if (lodCfg.glow === 'hover' && i !== hoverIdx && i !== selectedIdx) continue;
 
@@ -520,7 +504,7 @@
         const ci = colorIdx[i];
         if (ci !== lastIdx) { lastIdx = ci; sprite = getGlowSprite(table[ci]); }
 
-        // 辉光强度跟着缩放走：放得很大时不该糊成一团光
+        // 辉光强度跟着缩放走
         const glowGain = clamp(1.15 - 0.35 * Math.log10(Math.max(1, rScreen)), 0.25, 1.15);
         const half = spread * rScreen;
         const dim = hl[i] === 0 ? 0.3 : 1;
@@ -535,14 +519,7 @@
       ctx.globalAlpha = 1;
     }
 
-    // -----------------------------------------------------------------------
-    // 节点头：按颜色分组，每组一次 fill()
-    // -----------------------------------------------------------------------
-    // 🌟 正在出生的节点：用【精确 alpha】逐个画，不进 8 级量化桶。
-    //   为什么必须单独一条路：8 级量化把淡入切成 +0.143 的台阶（Obsidian 是 +0.100
-    //   连续），而且 a ∈ [6/7, 1) 一律被压成 0.9286 —— 实测最后连续 24 帧（0.4 秒）
-    //   画面完全不变，然后突然跳到 1.0。观感就是「节点一下子蹦出来」。
-    //   同时在场的出生节点只有 2~3 个，逐个 beginPath/fill 的代价可忽略。
+    // 节点头按颜色分组，每组 fill() 一次
     const midBirth = [];
     function drawMidBirth(list2, cnt, k, hl) {
       const table = D.colorTable, ra = D.renderAlpha;
@@ -630,9 +607,7 @@
       drawMidBirth(midBirth, midN, k, hl);
     }
 
-    // -----------------------------------------------------------------------
     // 标签
-    // -----------------------------------------------------------------------
     // （原有一个 measure() + measureText 缓存，从未被任何地方调用过 —— 已经删掉。
     //   宽度现在由 labelCache 的精灵条目一并提供，见文件上方 makeLabelSprite。）
     function drawLabels(list, count, lodCfg, k, hot, fadeRising) {
@@ -916,9 +891,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
     // 覆盖层：hover 环 / 选中环
-    // -----------------------------------------------------------------------
     function drawOverlay(hoverIdx, selectedIdx, k, lodCfg) {
       if (hoverIdx >= 0) {
         const r = Math.max(3, D.radius[hoverIdx] * D.scaleMul[hoverIdx] * k) + 3;
@@ -939,7 +912,7 @@
       }
     }
 
-    // -----------------------------------------------------------------------
+    // 背景色设置
     function setBackground(color) {
       bgColor = color || rcfg.bgFallback;
       canvas.style.background = bgColor;

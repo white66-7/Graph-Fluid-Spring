@@ -346,5 +346,59 @@
     return p;
   }
 
-  GFI.DataSource = { fetchData, fromLogseq, demo, query };
+  // 某一页 + 它的直接邻居
+  /**
+   * @param {{nodes:Array, links:Array}} data 全量图谱
+   * @param {object|null} page logseq.Editor.getCurrentPage() 的返回值
+   * @returns {{nodes:Array, links:Array, centerId:string|null, hitBy:string, reason:string}}
+   */
+  function pageNeighborhood(data, page) {
+    const empty = (reason) => ({ nodes: [], links: [], centerId: null, hitBy: '', reason });
+    if (!data || !data.nodes || !data.nodes.length) return empty('没有全量数据');
+
+    // 按 db id/按页名找到中心节点
+    let center = null;
+    let hitBy = '';
+    if (page) {
+      const pid = entityId(page);
+      // 按实体 ID 找
+      if (pid) {
+        center = data.nodes.find((n) => n.id === pid) || null;
+        if (center) hitBy = 'id';
+      }
+
+      // 按名字找
+      if (!center) {
+        const raw = firstString(page, ['name', 'title', 'originalName']);
+        const nm = raw ? String(raw).trim().toLowerCase() : '';
+        if (nm) {
+          center = data.nodes.find((n) => {
+            const a = String(n.pageName || '').trim().toLowerCase();
+            const b = String(n.label || '').trim().toLowerCase();
+            return a === nm || b === nm;
+          }) || null;
+          if (center) hitBy = 'name';
+        }
+      }
+    }
+    if (!center) return empty('当前页在过滤后的图谱里找不着');
+
+    // 一跳邻居
+    const keep = new Set([center.id]);
+    for (const l of data.links) {
+      if (l.source === center.id) keep.add(l.target);
+      else if (l.target === center.id) keep.add(l.source);
+    }
+    
+    // 由调用方决定要不要接管中心节点一个 
+    return {
+      nodes: data.nodes.filter((n) => keep.has(n.id)),
+      links: data.links.filter((l) => keep.has(l.source) && keep.has(l.target)),
+      centerId: center.id,
+      hitBy,
+      reason: 'ok',
+    };
+  }
+
+  GFI.DataSource = { fetchData, fromLogseq, demo, query, pageNeighborhood };
 })(window.GFI);

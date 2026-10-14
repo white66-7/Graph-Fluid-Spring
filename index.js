@@ -497,6 +497,50 @@
     return data;
   };
 
+  /**
+   * 运行时开关侧边栏页面图谱的接管。
+   *
+   * 为什么单独开一个口子：这块面板是新接的第二个实例，出问题时用户需要一个
+   * 【不用改代码、不用重载插件】就能退回原生图谱的办法 ——
+   * 主窗口控制台里 `__GFI__.sidebar(false)` 即可。
+   * 设置面板里暂时没有这个开关（那要同时改中英两套文案）。
+   */
+  GFI.setSidebarEnabled = function setSidebarEnabled(on) {
+    GFI.config.sidebar = GFI.config.sidebar || {};
+    GFI.config.sidebar.enabled = !! on;
+    if (!on) {
+      unmountSidebar('disabled by user');
+      console.log('[GFI] 侧边栏页面图谱：已关闭接管');
+    } else {
+      sbRetryAt = 0;             // 清掉冷却，下一轮扫描立刻尝试
+      scheduleScan();
+      console.log('[GFI] 侧边栏页面图谱：已开启接管');
+    }
+    return GFI.config.sidebar.enabled;
+  };
+
+  // ---------------------------------------------------------------------------
+  // reloadData 的包装：把侧边栏那份也带上
+  // ---------------------------------------------------------------------------
+  // 为什么用包装而不是改 reloadData 本体：reloadData 里有一串只对【主图谱】成立的
+  // 语义（afterDataChanged 作废预热缓存、startPrewarm 补预热）。侧边栏既不吃预热
+  // 也不该去动那个缓存 —— 直接塞进去就得在里面到处加"是不是主图谱"的判断。
+  // 包一层则两边各管各的：主图谱照旧，侧边栏只是跟着重裁一次。
+  //
+  // ⚠ 顺序不能反：必须在 reloadData 【写回 lastRaw 之后】再裁，早一步裁到的
+  //   还是改之前的那份快照。
+  // ⚠ reloadData 在"全屏图谱没开"时第一行就 `return null`、连库都不查。
+  //   那种情况下侧边栏必须自己现查一次，否则会把 lastRaw 里的旧快照当成新数据。
+  const _reloadData = GFI.reloadData;
+  GFI.reloadData = async function reloadDataAndSidebar() {
+    // 库变了 → "这一页不可接管"这个结论可能已经不成立（比如它刚被连上一条线）。
+    // 清掉无限冷却，让侧边栏重新试一次。
+    sbRetryAt = 0;
+    const fresh = await _reloadData();
+    try { await reloadSidebarGraph(!fresh); } catch (e) { }
+    return fresh;
+  };
+
   // 用上一次的原始数据就地重建管线 —— 不用查库，而且【位置按 id 继承】，
   // 所以改外观参数不会让图谱跳回随机位置。
   // 这是「调参数」的正确入口：改完设置调它，立刻看到效果。
@@ -535,9 +579,13 @@
   //   所以防抖 1500ms —— 停手之后才查。
   const graphRefresh = GFI.LiveWatch.createScheduler({
     debounceMs: 1500,
-    isMounted: () => !!(graphApi && graphApi.alive),
+    // ⚠ 两个面板任意一个开着都算"挂载中" —— 只认全屏那个的话，
+    //   用户只开着侧边栏图谱时改正文，那张小图永远不刷新。
+    isMounted: () => !!((graphApi && graphApi.alive) || (sbApi && sbApi.alive)),
     refresh: (reason) => {
       console.log(`[GFI] 检测到内容变动（${reason || ''}）—— 自动刷新图谱数据`);
+      // reloadData 已经被下面那个包装扩成了"主图谱 + 侧边栏一起刷"，
+      // 所以这里不要再各自处理一遍（否则一次内容变动会查两遍库）。
       return GFI.reloadData();
     },
   });
@@ -564,6 +612,321 @@
     }
   }
 
+  // ===========================================================================
+  // 右侧边栏的「页面图谱」—— 第二个图谱实例
+  // ===========================================================================
+  // 白盒依据（Logseq 2.0.2 resources/app.asar 里的编译产物）：
+  //   · 面板 DOM 是 `div.page-graph-panel.flex.flex-col.w-full`，
+  //     内联尺寸 min(72vh,860px) × 560，唯一的孩子是 `div.graph-canvas`
+  //   · 它和全屏图谱共用 `graph-2d` 组件 → 同样是 Pixi v8 的 Application
+  //     （所以 overlay 的 __PIXI_APP_INIT__ 钩子对它一样生效）
+  //   · 面板显示的页 = 【当前页】（组件从 :current-page 派生，没有当前页时退回默认页）
+  //   · 取当前页的桥：SDK 的 `_makeUserProxy` 把方法名交给
+  //     `Te = ge(e, {delimiter:"_"})` 做驼峰→下划线转换，
+  //     所以 `Editor.getCurrentPage()` → 宿主注册的 `logseq.api.get_current_page`。
+  //     （宿主注册的 145 个方法名全是下划线式，一个驼峰都没有 —— 转换是必需的）
+  //
+  // 数据口径：不另查库，直接把全量图谱【裁】成以当前页为中心的一跳子图
+  //   （`GFI.DataSource.pageNeighborhood`）。这样两处的连线判据永远一致。
+  let sbApi = null;              // 侧边栏那个图谱实例
+  let sbPageKey = '';            // 建它时用的那一页（用来发现"用户翻页了"）
+  let sbAbsentScans = 0;
+  let sbBooting = false;
+  let sbCheckInFlight = false;
+  let sbCheckedAt = 0;
+  // 下次允许再尝试接管的时刻。
+  //
+  // ⚠⚠ 没有它会出结构性事故：`scan()` 由 DOM 变动驱动、节流只有 32ms，而
+  //   "面板开着、但我们决定不接管"（当前页孤立 / 页不在图谱里）是个**持久状态**。
+  //   于是每一轮扫描都会走一遍 mountSidebar → loadSidebarSlice → 查一次库，
+  //   一秒三十次。冷却把"不接管"这个结论缓存几秒，翻页时会立刻清掉（见
+  //   sidebarOnMaybePageChanged），所以不会耽误正经的接管。
+  const SIDEBAR_RETRY_MS = 3000;
+  let sbRetryAt = 0;
+
+  const sbListeners = GFI.util.createListenerRegistry();
+
+  /** 取当前页实体。没有页面上下文时宿主会返回 null 或抛，两种都算"没有"。 */
+  async function currentPageEntity() {
+    const L = window.logseq;
+    try {
+      if (L && L.Editor && L.Editor.getCurrentPage) {
+        const p = await L.Editor.getCurrentPage();
+        return p || null;
+      }
+    } catch (e) { /* 打开的是白板/设置页时这里会抛，属正常 */ }
+    return null;
+  }
+
+  /**
+   * 当前页的指纹，只用来判断"变了没有"。
+   * ⚠ 不拿它做节点匹配 —— id 和名字【都】记着，因为 get_current_page 与
+   *   get_all_pages 返回的字段集合不保证一致，靠单个字段判等会漏判。
+   */
+  function pageKeyOf(page) {
+    if (!page) return '';
+    const id = page.id !== undefined ? page.id
+      : (page['db/id'] !== undefined ? page['db/id'] : page.dbId);
+    const name = page.name || page.title || page.originalName || '';
+    return String(id === undefined ? '' : id) + '|' + String(name).trim().toLowerCase();
+  }
+
+  /**
+   * 拿一份全量数据（优先复用主图谱已经拉到的），再裁出当前页的邻域。
+   * @param {boolean} [forceFetch] 明确要求现查一次库 —— 内容变动后重裁时必须用，
+   *        否则会拿 lastRaw 里那份【改之前】的快照，表现是"改了正文侧边栏不更新"。
+   */
+  async function loadSidebarSlice(forceFetch) {
+    let data = forceFetch ? null : lastRaw;
+    if (!data || !data.nodes.length) {
+      data = await GFI.DataSource.fetchData({
+        source: ((GFI.config.runtime || {}).dataSource),
+        demoCount: ((GFI.config.runtime || {}).demoCount),
+        includeParentLinks: false,
+      });
+    }
+    if (!data || !data.nodes || !data.nodes.length) return null;
+    const page = await currentPageEntity();
+    return { nb: GFI.DataSource.pageNeighborhood(data, page), page };
+  }
+
+  /**
+   * 给侧边栏那份数据配一份【已经跑完沉降】的布局。
+   *
+   * 为什么必须这么做（实机反馈："会抖两次 / 视野切换两次，切换时间长"）：
+   *   不带 layout 调 setData 会走"即时沉降"那条路 —— 先在种子螺旋上 fit 一次，
+   *   等物理跑睡着之后再【缓动】fit 一次（cfg.camera.fitAnimMs = 320ms）。
+   *   用户看到的就是画面抖两下，而且第二下还拖了三百多毫秒。
+   *   页面级小图（几个到几十个节点）跑同步沉降几乎零成本，直接一步到位。
+   *
+   * ⚠⚠ 必须传 noCache —— 见 warm.js 里 settleNow 的注释。默认行为会把结果写进
+   *   模块级的预热缓存槽、并把半成品交给后台预热接着跑。侧边栏这份是页面级小图，
+   *   混进去的后果是"进全屏图谱时吃到一张按某页邻域算出来的布局"：不报错、不崩，
+   *   只是位置全错 —— 这种错最难发现。
+   *
+   * @returns {Map|null} 布局；超预算 / 不可用时 null（调用方回退即时沉降）
+   */
+  function settleSidebar(nb) {
+    try {
+      if (!GFI.Warm || !GFI.Warm.settleNow) return null;
+      const entry = GFI.Warm.settleNow(nb.nodes, nb.links,
+        { source: 'sidebar', demoCount: 0 }, { noCache: true });
+      return entry && entry.layout ? entry.layout : null;
+    } catch (e) {
+      console.warn('[GFI] 侧边栏同步沉降失败，按即时沉降走', e);
+      return null;
+    }
+  }
+
+  function sidebarEnabled() {
+    const c = GFI.config.sidebar;
+    return !(c && c.enabled === false);
+  }
+
+  function sidebarMinNodes() {
+    const c = GFI.config.sidebar || {};
+    return c.minNodes === undefined ? 2 : c.minNodes;
+  }
+
+  /**
+   * 放弃接管：把面板交回原生。
+   *
+   * ⚠ 这里必须【拆掉实例】，不能只是"停手不做"。因为挂载是发生在取数【之前】的
+   *   （见 mountSidebar 的顺序说明），此刻我们的不透明加载屏已经盖在面板上了 ——
+   *   不拆的话那块屏会一直留着，用户看到的是"面板卡在加载中，永远不出来"。
+   *   unmount 会把这些全部还原：容器移除、原生 canvas 恢复可见、原生 Pixi 重新跑起来。
+   *
+   * @param {string} reason 给人看的理由（会进控制台）
+   * @param {boolean} permanent true = 这个页面就是不可接管，别再自动重试
+   */
+  function skipSidebar(reason, permanent) {
+    console.log('[GFI] 侧边栏页面图谱不接管：' + reason);
+    unmountSidebar('not applicable: ' + reason);
+    // ⚠ 「页面不可接管」必须把冷却拉到【无限】，而不是 3 秒。
+    //   能不能接管只取决于这一页自己（以及库有没有变），跟时间没关系。
+    //   3 秒一重试的话，翻到一个孤立页就会变成"每 3 秒加载屏闪一下再退回原生"。
+    //   翻页（hashchange）、关掉重开（面板消失时清）、库变动都会把它清掉。
+    if (permanent) sbRetryAt = Infinity;
+  }
+
+  async function mountSidebar() {
+    if (sbApi || sbBooting) return;
+    if (!sidebarEnabled()) return;
+    const root = GFI.Overlay.findPageGraphRoot();
+    if (!root) return;
+    sbBooting = true;
+    // 无论成功、失败还是"决定不接管"，都先把冷却拉起来 —— 失败路径同样会
+    // 每轮扫描重跑一次查库，那才是真正贵的那部分。
+    sbRetryAt = GFI.util.now() + SIDEBAR_RETRY_MS;
+
+    // ---- ① 先挂载，再取数 ----
+    // ⚠⚠ 顺序不能反，这是「加载屏」这条反馈的根因。
+    //   原来是"先 await 取数（300~500ms）→ 再挂载"。那段时间里露在外面的
+    //   是【Logseq 原生那张页面图谱】；等我们的加载屏终于出现时数据已经快到了，
+    //   屏只闪一下就没了 —— 用户看到的就是「加载屏呢？」。
+    //   全屏图谱那条路早就是"先把查库挂起来、立刻挂载"（见下面 beginFetch 的注释），
+    //   侧边栏这里当初是漏了这一步。
+    //   附带好处：原生那张图谱从此一次都不露脸。
+    sbApi = GFI.Main.boot({
+      root,
+      nodes: [],
+      links: [],
+      // ⚠ 侧边栏那份【不是】主实例：__GFI__ / GFI.getGraph() / 设置面板热更新
+      //   都该继续盯着全屏图谱，不能被这块小面板抢走。
+      primary: false,
+      // 560px 宽塞不下工具栏和时间轴（见 config.sidebar 的说明）
+      chrome: { toolbar: false, timeline: false },
+      // 留白走侧边栏自己那条线（绝对值，见 config.sidebar.fitPadding）
+      fitPad: 'sidebar',
+      onNodeActivate: activateNode,
+    });
+    if (!sbApi) { sbBooting = false; return; }
+
+    try {
+      // ---- ② 取数（这段时间加载屏亮着）----
+      const got = await loadSidebarSlice();
+
+      // 面板可能在等数据期间被关掉、被 React 换掉，或者我们已经被别的路径拆了
+      if (!sbApi) { sbBooting = false; return; }
+      if (!sbApi.alive) { unmountSidebar('overlay detached'); sbBooting = false; return; }
+      if (sbApi.root !== root) { unmountSidebar('panel replaced'); sbBooting = false; return; }
+
+      if (!got) { skipSidebar('取不到数据（本次按暂时失败处理，稍后重试）', false); return; }
+      const { nb, page } = got;
+
+      // 只有中心节点一个（孤立页）时不接管 —— 原生那块至少还能让用户拖一拖看个位置
+      if (!nb.centerId) { skipSidebar(nb.reason, true); return; }
+      if (nb.nodes.length < sidebarMinNodes()) {
+        skipSidebar(`邻域只有 ${nb.nodes.length} 个节点（< ${sidebarMinNodes()}）`, true);
+        return;
+      }
+
+      sbPageKey = pageKeyOf(page);
+      sbRetryAt = 0;             // 接管成功 → 冷却不再需要
+
+      // ---- ③ 同步沉降，一步到位（避免"先 fit 一次、沉降完再缓动 fit 一次"）----
+      const layout = settleSidebar(nb);
+      // reveal:false —— 加载屏刚收起就【立刻】呈现最终画面，不再叠一层淡入。
+      // 淡入是给"从原生图谱交接过来"那种场合的；这里前面就是一块不透明加载屏，
+      // 再淡入只是让"切换时间"变长。
+      sbApi.setData(nb.nodes, nb.links, layout ? { layout, reveal: false } : undefined);
+      GFI.Overlay.record('侧边栏页面图谱接管',
+        `${nb.nodes.length} 节点/${nb.links.length} 边，中心命中方式=${nb.hitBy}`
+        + `${layout ? '，同步沉降一步到位' : '，即时沉降'}`);
+      console.log(`[GFI] 侧边栏页面图谱接管：${nb.nodes.length} 节点 / ${nb.links.length} 边`
+        + `（中心命中方式 ${nb.hitBy}${layout ? '，一步到位' : '，即时沉降'}）`);
+    } catch (e) {
+      console.error('[GFI] 侧边栏页面图谱挂载失败', e);
+      skipSidebar('挂载异常：' + ((e && e.message) || e), false);
+    } finally {
+      sbBooting = false;
+    }
+  }
+
+  /** 同一个面板、换了一页 → 就地换数据（位置按 id 继承，不会跳回随机） */
+  async function reloadSidebarGraph(forceFetch) {
+    if (!sbApi || !sbApi.alive) return;
+    const got = await loadSidebarSlice(forceFetch);
+    if (!got || !sbApi || !sbApi.alive) return;
+    const { nb, page } = got;
+    if (!nb.centerId) {
+      // 新页在过滤后的图谱里压根没有 → 保留上一张图，别让它闪成空白
+      console.log(`[GFI] 侧边栏页面图谱：新页取不到中心节点（${nb.reason}），保留上一张`);
+      sbPageKey = pageKeyOf(page);
+      return;
+    }
+    sbPageKey = pageKeyOf(page);
+    // ⚠ 换页同样要一步到位。不带 layout 的话，每翻一页都会重演一次
+    //   "先 fit 一次、沉降完再缓动 fit 一次"的双击 —— 翻页比首次挂载更频繁，
+    //   那里的抖动更烦人。
+    const layout = settleSidebar(nb);
+    sbApi.setData(nb.nodes, nb.links, layout ? { layout, reveal: false } : undefined);
+    console.log(`[GFI] 侧边栏页面图谱已跟随换页：${nb.nodes.length} 节点 / ${nb.links.length} 边`
+      + `${layout ? '（一步到位）' : '（即时沉降）'}`);
+  }
+
+  /**
+   * 已挂载时回头确认"当前页还是不是当初那一页"。
+   *
+   * ⚠ 为什么需要主动确认：页面切换时 React 会**复用** `div.page-graph-panel`
+   *   这个元素（同位置同类型，只换 props），我们的容器因此还在 DOM 里、`alive`
+   *   依旧为真 —— 光靠"容器掉了就重挂"是发现不了翻页的，图谱会停在上一页。
+   *   节流到 config.sidebar.pageCheckMs，因为每次确认都是一次 IPC。
+   */
+  function checkSidebarPage(force) {
+    if (!sbApi || !sbApi.alive || sbCheckInFlight) return;
+    const every = (GFI.config.sidebar && GFI.config.sidebar.pageCheckMs) || 1000;
+    if (!force && GFI.util.now() - sbCheckedAt < every) return;
+    sbCheckedAt = GFI.util.now();
+    sbCheckInFlight = true;
+    currentPageEntity().then((page) => {
+      sbCheckInFlight = false;
+      if (!sbApi || !sbApi.alive) return;
+      if (pageKeyOf(page) === sbPageKey) return;
+      reloadSidebarGraph();
+    }).catch(() => { sbCheckInFlight = false; });
+  }
+
+  function unmountSidebar(reason) {
+    if (sbApi) {
+      sbApi.destroy(reason || 'sidebar page graph closed');
+      sbApi = null;
+    }
+    sbPageKey = '';
+    sbCheckedAt = 0;
+    sbAbsentScans = 0;
+  }
+
+  function scanSidebar() {
+    const root = GFI.Overlay.findPageGraphRoot();
+    if (root) {
+      sbAbsentScans = 0;
+      // 陈旧实例守卫 —— 判据和主图谱那条一样：看【容器】还连不连着
+      if (sbApi && !sbApi.alive) {
+        sbApi.destroy('overlay detached');
+        sbApi = null;
+        sbPageKey = '';
+      }
+      if (!sbApi) {
+        // ⚠ 冷却必须在 mountSidebar 之外也判一次 —— 它是"别每 32ms 查一遍库"
+        //   这道闸门的真正位置（mountSidebar 内部也会设它，但那只在真跑起来之后）。
+        if (sidebarEnabled() && GFI.util.now() >= sbRetryAt) mountSidebar();
+      } else {
+        checkSidebarPage(false);
+      }
+    } else if (sbApi) {
+      if (++sbAbsentScans >= ABSENT_SCANS_TO_UNMOUNT) {
+        sbAbsentScans = 0;
+        unmountSidebar('sidebar page graph closed');
+      } else {
+        scheduleScan();          // 自己续下一次扫描，理由同主图谱那条
+      }
+    } else {
+      // 面板不在、我们也没接管 → 把"这一页不可接管"那个无限冷却清掉。
+      // 否则用户关掉面板再打开，会一直停在"什么都不发生"的状态。
+      sbRetryAt = 0;
+    }
+  }
+
+  /** 翻页了（hashchange）。已接管 → 立刻重新核对这一页；还没接管 → 清掉冷却重试。 */
+  function sidebarOnMaybePageChanged() {
+    if (sbApi && sbApi.alive) { checkSidebarPage(true); return; }
+    // 上一页可能是孤立的、导致我们放了 3 秒冷却；新页可能完全不孤立，
+    // 所以这里把冷却清掉，让下一轮扫描（32ms 内）立刻重试一次。
+    sbRetryAt = 0;
+    scheduleScan();
+  }
+
+  // Logseq 用 hash 路由（宿主自己就有 `hashchange-listener`），所以翻页时
+  // hashchange 会先到 —— 拿它做一次"立刻确认"，省掉最多 pageCheckMs 的滞后。
+  function startSidebarRouteWatch() {
+    const w = GFI.topWin;
+    if (!w) return;
+    try {
+      sbListeners.add(w, 'hashchange', sidebarOnMaybePageChanged);
+    } catch (e) { /* 挂不上就只靠轮询 */ }
+  }
+
   // 视图开关监听
   // Logseq 自己的重渲染会让 #global-graph 短暂消失（几帧到几十毫秒）。
   // 一发现不在就拆掉的话，会白跑一次数据拉取、还会把已经沉降好的布局重置，
@@ -574,6 +937,8 @@
   function scan() {
     scanTimer = null;
     try {
+      // 侧边栏那块面板是独立的一条生命周期，跟着同一次扫描一起跑
+      scanSidebar();
       if (graphRootPresent()) {
         // 陈旧实例守卫。
         // ⚠ 判据是【容器】是否还连着，不是 root —— React 重渲染 #global-graph 时
@@ -766,6 +1131,34 @@
         console.log(`[GFI] 语言 → ${now}；面板文案改写 ${GFI.i18n.relabelPanel()} 条`);
         return now;
       };
+
+      // ---- 侧边栏页面图谱的控制台入口 ----
+      // ⚠⚠ 为什么不挂在 `__GFI__` 上：`__GFI__` 只由【主实例（全屏图谱）】发布，
+      //   而"调侧边栏留白"这件事最可能在【只开着侧边栏、全屏图谱没开】时做 ——
+      //   那时候 `__GFI__` 根本不存在，用户会以为插件没加载。
+      //   这个句柄是 index.js 这个单例挂的，跟哪个图谱实例开着无关，永远在。
+      GFI.topWin.__GFI_SIDEBAR__ = {
+        /** 侧边栏留白（每边 CSS px）：fit() 查询当前值，fit(64) 设置并立刻重适配 */
+        fit: (px) => (GFI.setSidebarFitPadding ? GFI.setSidebarFitPadding(px) : null),
+        /** 接管开关：on() / off() 退回原生图谱 */
+        on: () => (GFI.setSidebarEnabled ? GFI.setSidebarEnabled(true) : null),
+        off: () => (GFI.setSidebarEnabled ? GFI.setSidebarEnabled(false) : null),
+        /** 现在是什么状态 */
+        state: () => {
+          const api = GFI.getSidebarGraph ? GFI.getSidebarGraph() : null;
+          const panel = GFI.Overlay.findPageGraphRoot && GFI.Overlay.findPageGraphRoot();
+          return {
+            面板在不在: !!panel,
+            接管中: !!(api && api.alive),
+            留白设置: (GFI.config.sidebar || {}).fitPadding,
+            留白实际生效: api && api.alive ? api.fitPadding : null,
+            节点数: api && api.alive ? api.data.n : null,
+            当前页: sbPageKey || null,
+          };
+        },
+      };
+      console.log('[GFI] 侧边栏控制台入口：__GFI_SIDEBAR__.state() 看状态，'
+        + '__GFI_SIDEBAR__.fit(px) 调视野留白，__GFI_SIDEBAR__.off() 退回原生');
     }
   } catch (e) { }
 
@@ -773,6 +1166,7 @@
     try {
       applySettings(window.logseq && window.logseq.settings);
       startObserver();
+      startSidebarRouteWatch();
       // 兜底再喊一次：ready 回调里已经喊过了，这里对"还没起步"的情况（比如
       // ready 回调里那次抛错、或走了下面的非 logseq 分支）补一脚。
       // prewarm() 对同一个 key 返回同一个 Promise，重复调用是幂等的。
@@ -787,6 +1181,8 @@
       logseq.beforeunload(async () => {
         stopObserver();
         unmountGraph();
+        unmountSidebar('plugin unloading');
+        try { sbListeners.removeAll(); } catch (e) { }
         // 插件真的要走了才摘 Pixi 钩子。
         // ⚠ 不能挪进 unmountGraph()：图谱视图来来去去都会走那条路径，
         //   而摘掉钩子会整整漏掉下一个 Application

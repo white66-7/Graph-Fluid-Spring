@@ -293,10 +293,13 @@
    * @param {Array} nodes 已经拿到的原始节点
    * @param {Array} links
    * @param {object} [req] { source, demoCount } 用来写缓存 key
+   * @param {object} [opts] { noCache:boolean }
+   *        noCache = 只算布局，绝不动缓存槽。**侧边栏页面图谱必须传它。**
    * @returns {object|null} 缓存条目；没跑完 / 数据为空时 null
    */
-  function settleNow(nodes, links, req) {
+  function settleNow(nodes, links, req, opts) {
     const key = keyOf(req);
+    const noCache = !!(opts && opts.noCache);
     if (!nodes || !nodes.length) return null;
 
     const limit = syncSettleMs();
@@ -330,7 +333,12 @@
     if (timedOut || sim.isAwake()) {
       // 没跑完 —— 这份布局不能用（半沉降的坐标和最终形态不是一张图，
       // 灌进去反而会让第一帧"跳"一下）。但已经跑出来的 tick 不浪费。
-      partial = { key, data: { nodes, links }, D, sim, ticks, maxTicks, spentMs: spent };
+      //
+      // ⚠ noCache 时必须连 partial 一起跳过。partial 是留给【后台预热】接着跑完
+      //   的 —— 侧边栏那份是页面级小图，扔进去会让预热拿它跑完、然后以
+      //   【全屏图谱的 key】写进缓存。后果不是报错，是"进全屏图谱时吃到一张
+      //   按某页邻域算出来的布局"，错得静悄悄。
+      if (!noCache) partial = { key, data: { nodes, links }, D, sim, ticks, maxTicks, spentMs: spent };
       obs = {
         节点: D.n, 边: D.m, tick数: ticks, 成本ms: spent,
         包围盒: null, alpha: +sim.alpha.toExponential(2),
@@ -343,8 +351,7 @@
     const entry = buildEntry(key, D, sim, ticks, false);
     entry.syncTicks = ticks;
     entry.costMs = spent;
-    cache = entry;
-    partial = null;
+    if (!noCache) { cache = entry; partial = null; }
     obs = Object.assign(obsOf(entry), { 同步抢跑: '命中，一步到位' });
     console.log(`[GFI] 同步抢跑完成 ${entry.costMs}ms　${ticks} tick　包围盒 ${entry.bbox.w}×${entry.bbox.h}`);
     return entry;
@@ -383,6 +390,7 @@
       抢跑预算ms: syncSettleMs(),
       tick上限倍率: maxTicksFactor(),
       有缓存: !!cache,
+      有半成品: !!partial,
       正在预热: !!inflight,
       最近一次: obs,
       缓存: cache ? {

@@ -112,15 +112,63 @@
     return doc.querySelector('#global-graph');
   }
 
+  /**
+   * 找到右侧边栏里那块「页面图谱」面板。
+   *
+   * 选择器出处（白盒，Local Logseq 2.0.2 `resources/app.asar` 里的编译产物）：
+   *   `szf` 这个渲染函数产出的根节点关键字就是
+   *     `div.page-graph-panel.flex.flex-col.w-full`
+   *   并带了内联尺寸 `{:height "min(72vh, 860px)" :width 560}`；
+   *   它唯一的孩子是 `graph-2d` 组件产出的 `div.graph-canvas` —— 和全屏图谱
+   *   （`div#global-graph.graph-root` 里的那个 `div.graph-canvas`）**是同一个组件**。
+   *
+   * ⚠ 没有限定在 `#right-sidebar` 里查，而是查完再往上验证一句：
+   *   万一将来 Logseq 让用户把页面图谱拖到别处，只按 id 找会直接失效；
+   *   而"存在但不在侧边栏里"是个可以降级的情况，值得认。
+   *   反过来，如果只按 `.page-graph-panel` 找、不做任何校验，某个第三方主题
+   *   恰好用同名类就会误接管 —— 所以这个校验留着。
+   */
+  function findPageGraphRoot() {
+    const doc = GFI.topDoc;
+    if (!doc) return null;
+    const el = doc.querySelector('.page-graph-panel');
+    if (!el) return null;
+    return el.closest('#right-sidebar') ? el : null;
+  }
+
 
   // 原生 Pixi 渲染器的暂停与恢复
   // Logseq 的 Pixi ticker 每帧执行 renderer.render({container: stage})
   // 不停止会浪费算力
-  const capturedApps = [];        // 所有见过的 Application
-  const pausedApps = [];          // 被我们停掉的 Application
+  //
+  // ⚠⚠ 「被我们盖住的 root」和「被我们停掉的原生 App」必须【按实例】记账，
+  //   不能放模块级变量。原先只有全屏图谱一个实例，放模块级看不出问题；
+  //   接上侧边栏页面图谱（第二块画布）之后，两个实例会互相踩：
+  //   侧边栏接管时把模块级的 takeoverRoot 改掉，全屏那边就再也停不下来
+  //   （或者反过来被 Resume），表现是「两个原生 Pixi 循环一起烧 CPU」——
+  //   而这恰恰是这套机制当初存在的唯一理由。
+  //
+  //   捕获总账 capturedApps 仍然留在模块级 —— 它记的是「见过的所有 Application」，
+  //   与属于哪块面板无关；归属判定（canvas 是否在本实例的 root 里）交给各自的 pause。
+  const capturedApps = [];        // 所有见过的 Application（全局总账）
+  const liveOverlays = [];        // 已 mount、尚未 unmount 的 overlay 实例
   let captureHook = null;
   let captureInstalled = false;
-  let takeoverRoot = null;        // 是否接管原生 #global-graph
+
+  /**
+   * 把「所有正在接管的实例各暂停一遍」排到下一个 task。
+   *
+   * ⚠ 必须延后，不能当场调：`Application.init()` 里触发 `__PIXI_APP_INIT__` 的那一刻，
+   *   Pixi 自己的 canvas 还没被 appendChild 进 `.graph-canvas`（宿主是 init 之后
+   *   才挂的），此时 `root.contains(canvas)` 恒为 false —— 当场判会漏掉这个 App。
+   */
+  function schedulePauseAll() {
+    try {
+      GFI.topWin.setTimeout(() => {
+        for (const o of liveOverlays.slice()) { try { o.pauseNative(); } catch (e) { } }
+      }, 0);
+    } catch (e) { }
+  }
 
   function installPixiCapture() {
     if (captureInstalled) return;
@@ -132,13 +180,11 @@
       captureHook = function (app, version) {
         record('原生 Pixi 起画（原生图谱此刻已经能看）');
         try { if (app && app.canvas) capturedApps.push(app); } catch (e) { }
-        if (takeoverRoot) {
-          // 如果发现我们正在接管，就预约一个暂停操作，但稍后再做
-          try { GFI.topWin.setTimeout(pauseNativeRenderers, 0); } catch (e) { }
-        }
+        // 只要还有实例在接管，就预约一次全实例暂停（各自按 root 过滤，误伤不了别人）
+        if (liveOverlays.some((o) => o.takingOver)) schedulePauseAll();
         if (typeof prev === 'function') { try { prev(app, version); } catch (e) { } }
       };
-      // 此时跑完别人的 __PIXI_APP_INIT__ 
+      // 此时跑完别人的 __PIXI_APP_INIT__
       // 注册自己的
       w.__PIXI_APP_INIT__ = captureHook;
       captureInstalled = true;
@@ -154,31 +200,23 @@
   }
 
   /**
-   * 停掉盖在 root 上的原生渲染循环。
-   * @returns {number} 本次停了几个
+   * 模块级入口：把所有【正在接管】的实例各暂停一遍。
+   * 没在接管的实例是 no-op，所以这个调用天然安全。
+   * @returns {number} 本次一共停了几个
    */
   function pauseNativeRenderers() {
-    if (!takeoverRoot) return 0;
     let k = 0;
-    for (const app of liveApps()) {
-      let c = null;
-      try { c = app.canvas; } catch (e) { continue; }
-      if (!c || !takeoverRoot.contains(c)) continue;   // 只动我们盖住的那块画布
-      try {
-        app.stop();
-        if (pausedApps.indexOf(app) < 0) pausedApps.push(app);
-        k++;
-      } catch (e) { }
+    for (const o of liveOverlays.slice()) {
+      try { k += o.pauseNative(); } catch (e) { }
     }
     return k;
   }
 
-  /* 渲染重新循环 */
+  /** 模块级入口：把所有实例暂停过的原生渲染器都还回去 */
   function resumeNativeRenderers() {
-    for (const app of pausedApps) {
-      try { app.start(); } catch (e) { }
+    for (const o of liveOverlays.slice()) {
+      try { o.resumeNative(); } catch (e) { }
     }
-    pausedApps.length = 0;
   }
 
   //  卸载__PIXI_APP_INIT__函数, 由index.js 的 beforeunload 调用。
@@ -191,8 +229,10 @@
     captureInstalled = false;
     captureHook = null;
     capturedApps.length = 0;
-    pausedApps.length = 0;
-    takeoverRoot = null;
+    for (const o of liveOverlays.slice()) {
+      try { o.resumeNative(); } catch (e) { }
+    }
+    liveOverlays.length = 0;
   }
 
   // 参数与返回注释
@@ -210,6 +250,37 @@
     // 挂载过、还活着、还在DOM里就返回
     if (root.__gfiMounted && root.__gfiContainer && root.__gfiContainer.isConnected) return null;
     root.__gfiMounted = true;
+
+    // ---- 本实例的接管状态（原先是模块级的两个变量，见文件上方 capturedApps 的说明）----
+    let takeoverRoot = null;       // 本实例正在盖住哪个 root（null = 已交还原生）
+    const pausedApps = [];         // 本实例停掉的原生 Application
+
+    /** 停掉盖在本实例 root 上的原生渲染循环（未接管时是 no-op） */
+    function pauseNative() {
+      if (!takeoverRoot) return 0;
+      let k = 0;
+      for (const app of liveApps()) {
+        let c = null;
+        try { c = app.canvas; } catch (e) { continue; }
+        // ⚠ 只动「在本实例 root 里」的那块画布 —— 全屏图谱和侧边栏页面图谱
+        //   各有一块，这条 containment 判据就是两块面板互不误伤的全部依据。
+        if (!c || !takeoverRoot.contains(c)) continue;
+        try {
+          app.stop();
+          if (pausedApps.indexOf(app) < 0) pausedApps.push(app);
+          k++;
+        } catch (e) { }
+      }
+      return k;
+    }
+
+    /** 把本实例停掉的原生渲染循环还回去 */
+    function resumeNative() {
+      for (const app of pausedApps) {
+        try { app.start(); } catch (e) { }
+      }
+      pausedApps.length = 0;
+    }
 
     injectStyles();
 
@@ -239,10 +310,17 @@
     canvas.className = 'gfi-canvas';
     container.appendChild(canvas);
 
-    // 加载指示。默认隐藏
+    // 加载屏。默认隐藏
+    //
+    // ⚠ 必须是【不透明】的整块盖屏，不能只是浮在画布上的一行字。
+    //   原因：数据到位之前画布会经历两次视野变化（种子布局上先 fit 一次、
+    //   沉降完成后又缓动一次）。透明的 loader 挡不住它们，用户看到的就是
+    //   "抖两次"；不透明盖屏之后，那两次变化发生在屏后，用户只看到最后那一次。
+    //   底色用图谱自己的背景色（和 canvas 同一个来源），所以收起时不会闪色。
     const loader = doc.createElement('div');
     loader.className = 'gfi-loader';
     loader.hidden = true;
+    try { loader.style.background = readBackground(); } catch (e) { }
     const spinner = doc.createElement('div');
     spinner.className = 'gfi-spinner';
     const loaderText = doc.createElement('div');
@@ -315,11 +393,17 @@
         }
         container.style.display = nativeVisible ? 'none' : '';
         takeoverRoot = nativeVisible ? null : root;
-        if (nativeVisible) resumeNativeRenderers();
-        else pauseNativeRenderers();
-        // 时序探针 
+        if (nativeVisible) resumeNative(); else pauseNative();
+        // 时序探针
         record(nativeVisible ? '切回原生图谱' : '隐藏原生图谱（我们接管）');
       },
+
+      // 本实例是否正在接管（captureHook 用它决定要不要排一次全实例暂停）
+      get takingOver() { return !!takeoverRoot; },
+
+      // 供模块级入口（pauseNativeRenderers / releasePixiCapture）按实例调用
+      pauseNative,
+      resumeNative,
 
       // 被暂停的原生渲染器数量
       get pausedNativeRenderers() { return pausedApps.length; },
@@ -328,8 +412,10 @@
 
       unmount() {
         // 交还宿主
-        resumeNativeRenderers();
+        resumeNative();
         takeoverRoot = null;
+        const li = liveOverlays.indexOf(api);
+        if (li >= 0) liveOverlays.splice(li, 1);
         try { if (observer) observer.disconnect(); } catch (e) { }
         observer = null;
         if (resizeRaf != null) { try { GFI.topWin.cancelAnimationFrame(resizeRaf); } catch (e) { } resizeRaf = null; }
@@ -354,6 +440,10 @@
         return !!(container && container.isConnected && canvas && canvas.isConnected);
       },
     };
+
+    // 登记进全局总账 —— captureHook / pauseNativeRenderers / releasePixiCapture
+    // 都靠它遍历实例。unmount() 里会摘掉。
+    liveOverlays.push(api);
 
     return api;
   }
@@ -406,8 +496,10 @@
   startRootWatch();
 
   GFI.Overlay = {
-    mount, findRoot, injectStyles, readBackground, STYLE_ID,
+    mount, findRoot, findPageGraphRoot, injectStyles, readBackground, STYLE_ID,
     releasePixiCapture, pauseNativeRenderers, resumeNativeRenderers,
     record, printEvents, clearEvents, startRootWatch,
+    /** 已经挂载、还没拆掉的 overlay 实例（全屏图谱 + 侧边栏页面图谱） */
+    get mounted() { return liveOverlays.slice(); },
   };
 })(window.GFI);

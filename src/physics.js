@@ -74,7 +74,7 @@
       const { m, lsrc, ltgt, ldist, lstr, lvisible } = D;
       const boosting = dragBoostNode >= 0;
 
-      // 🌟 hub-hub 边加强
+      // hub-hub 边加强
       const hubThreshold = cfg.hubLinkThreshold || 5;
       const hubLinkBoost = cfg.hubLinkBoost || 1;
 

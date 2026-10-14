@@ -6,37 +6,70 @@
   const { clamp } = GFI.util;
   const DT = GFI.DT;
 
-  let instance = null;
+  // 图谱实例表：一个 root 一个实例。
+  //
+  // 为什么要有它：我们【同时】接管两块面板 —— 全屏图谱（`#global-graph`）和
+  // 右侧边栏的页面图谱（`.page-graph-panel`）。它们是两个独立的 root、两个独立的
+  // Pixi Application、两套节点数据，所以必须是两个实例。
+  // ⚠ 原先这里只有 `let instance`，`boot()` 第二行就是 `if (instance) return instance`
+  //   —— 侧边栏想挂载会直接拿到全屏那个实例，画到别人的 canvas 上去。
+  const instances = new Map();     // HTMLElement root → api
+  // 主实例（全屏图谱）。`GFI.getGraph()` / `__GFI__` / 设置面板的热更新都只看它 ——
+  // 侧边栏那份是它的"缩小版跟随者"，不该被当成全局状态的主人。
+  let primary = null;
 
   function createPipeline(overlay, cam, nodes, links, prevD, layout) {
     const D = GFI.Data.build(nodes, links, prevD, layout);
     const sim = GFI.Physics.create(D, GFI.config.physics);
-    const fx = GFI.Effects.create(D, sim);
+    const fx = GFI.Effects.create(D);
     const renderer = GFI.Renderer.create(overlay.canvas, D, cam);
     renderer.setGrid(sim.grid);
 
     let inter = null;
     let timeline = null;
 
-    return { D, sim, fx, renderer,
-             get inter() { return inter; }, set inter(v) { inter = v; },
-             get timeline() { return timeline; }, set timeline(v) { timeline = v; } };
+    return {
+      D, sim, fx, renderer,
+      get inter() { return inter; }, set inter(v) { inter = v; },
+      get timeline() { return timeline; }, set timeline(v) { timeline = v; }
+    };
   }
 
   function boot(opts) {
     opts = opts || {};
-    if (instance) return instance;
+    // ⚠ root 必须由调用方给：`GFI.Overlay.findRoot()` 写死的是全屏图谱，
+    //   侧边栏那块面板得传自己的 `.page-graph-panel` 进来。
+    const root = opts.root || GFI.Overlay.findRoot();
+    if (!root) return null;
+
+    // 同一个 root 不重复挂（React 重渲染会连着喊好几次）
+    const existing = instances.get(root);
+    if (existing) {
+      if (existing.alive) return existing;
+      // 容器被 React 清掉了 —— 清掉登记，往下走重挂
+      instances.delete(root);
+    }
 
     const cfg = GFI.config;
-    const root = GFI.Overlay.findRoot();
-    if (!root) return null;
+
+    // 相机、循环、工具栏、时间轴是【全屏图谱】的配置；侧边栏那块面板只有
+    // 560px 宽、还带个 min(72vh,860px) 的高度上限，塞不下那套控件，
+    // 而且它的时间轴语义也和全局图谱不同（见 index.js 的 sidebar 控制器）。
+    const chrome = opts.chrome || {};
+    const wantToolbar = chrome.toolbar !== false;
+    const wantTimeline = chrome.timeline !== false;
 
     let nativeMode = !!cfg.useNativeGraph;
 
-    // 挂载即接管 
+    // 挂载即接管
     const deferTakeover = false;
     const overlay = GFI.Overlay.mount(root, { nativeVisible: deferTakeover });
     if (!overlay) return null;
+
+    // ⚠ 不要工具栏的那条路必须把【容器元素本身】也摘掉。
+    //   `.gfi-toolbar` 是个有背景色、圆角、内边距的浮动胶囊 ——
+    //   只把里面塞空的话，面板底部会挂着一个空的小黑条。
+    if (!wantToolbar) { try { overlay.toolbar.remove(); } catch (e) { } }
 
     GFI.Overlay.record('overlay 挂载完成',
       deferTakeover ? '原生图谱继续显示' : '原生图谱已隐藏');
@@ -117,6 +150,14 @@
     // 用户一旦自己操作过（拖拽/平移），就取消这次自动适配，不跟人抢镜头。
     let autoFitPending = false;
 
+    // ---- 「停顿帧」判据（见 frame 里 elapsed 的说明）----
+    // 超过「近期帧耗中位数 × STALL_FACTOR」且绝对上超过 STALL_MIN_MS 的那一帧，
+    // 视为主线程被外部占住（GC / 宿主 / 我们的同步沉降），只推进一个标称步长。
+    // STALL_MIN_MS 不能太小：正常抖动到 100ms 的库不该被当成停顿 ——
+    // 那会把它的时间推进压成 16.67ms/帧，物理变成慢动作。
+    const STALL_MIN_MS = 100;
+    const STALL_FACTOR = 3;
+
     // ---- LOD 自适应 ----
     const lodCfg = cfg.lod;
     const frameTimes = new Float32Array(lodCfg.sampleFrames);
@@ -169,12 +210,6 @@
         }
       }
 
-      // ⚠ 这两行必须留在【所有早退路径之外】。
-      //   原先它们排在两个 early return 后面，于是「手动锁档」(__GFI__.setLod)
-      //   以及「采样窗口还没填满的头 30 帧」，sim.lod 都停在初始值 ——
-      //   降档那套「隔 tick 跑斥力 / 跳过碰撞 / 跳过孤立节点斥力」全部不生效，
-      //   锁档等于按了没反应的按钮。
-      if (P.fx && P.fx.setPulsesEnabled) P.fx.setPulsesEnabled(lodCfg.levels[lodLevel].pulses);
       P.sim.lod = lodLevel;
     }
 
@@ -203,14 +238,12 @@
       markDirty();
     });
 
-    // 工具栏
-    const toolbar = GFI.Toolbar.create(overlay.toolbar, {
+    // 工具栏（侧边栏那块面板用空实现，见 GFI.Toolbar.createNull 的说明）
+    const toolbar = wantToolbar ? GFI.Toolbar.create(overlay.toolbar, {
       onTogglePlay() { if (P.timeline) { P.timeline.toggle(); syncToolbar(); } },
       onScrub(p) {
         if (!P.timeline || !P.timeline.range) return;
-        P.timeline.setSliderValue(p * P.timeline.range.duration, {
-          viewportWorldHeight: cssH / Math.max(0.01, cam.k),
-        });
+        P.timeline.setSliderValue(p * P.timeline.range.duration);
         syncToolbar();
       },
       onScrubEnd() { markDirty(); },
@@ -220,7 +253,7 @@
         syncToolbar();
       },
       onFit() { fitViewAnimated(); },
-    });
+    }) : GFI.Toolbar.createNull();
 
     function syncToolbar() {
       const tl = P.timeline;
@@ -272,13 +305,16 @@
       toolbar.setTimeTravelAvailable(!!P.timeline.range);
       if (P.timeline.range) {
         // 初始落在 "现在"
-        P.timeline.setCutoff(P.timeline.range.max, { pulse: false, silent: true });
+        P.timeline.setCutoff(P.timeline.range.max);
       }
       syncToolbar();
     }
 
     attachInteraction();
-    attachTimeline();
+    if (wantTimeline) attachTimeline();
+    // 没有时间轴就不会有范围/进度，但调用顺序上 syncToolbar 可能先跑一轮 ——
+    // 空实现 + 这里的 setTimeTravelAvailable 保证工具栏任何状态下都不显示那组控件。
+    else toolbar.setTimeTravelAvailable(false);
 
     // 记录 fitView 得到的缩放。标签阈值以它为基准做相对判断 ——
     // 世界单位是任意的（88 节点的图 fit 后 k≈0.08，3000 节点 k≈0.01），
@@ -294,11 +330,25 @@
      *
      * 所以把它当成【上限】：小视口按 6% 缩，并且至少留 10px。
      * 243 高的窗口 → 14px；800 高的窗口 → 48px；≥1200 才用满 72。
+     *
+     * ⚠ 侧边栏面板走另一条线（`opts.fitPad === 'sidebar'`），见 config.sidebar.fitPadding：
+     *   它是一个【绝对值】而不是比例。面板只有 560px，同一个 6% 算出来只有 ~33px，
+     *   实测偏紧；而绝对值"每边留 48px"是按眼睛调出来的，不用脑补比例。
+     *   这个值是每次调用【现读】的，所以调参不需要重挂实例。
      */
     const FIT_PAD_LIMIT = 10;      // 两侧加起来最少要留的空间
+    // 侧边栏没有 config 时的兜底（面板小，别让留白吃满）
+    const SB_FIT_PAD_FALLBACK = 48;
+    const isSidebarFit = opts.fitPad === 'sidebar';
     function fitPad() {
+      const short = Math.min(cam.W, cam.H);
+      if (isSidebarFit) {
+        // 每边留白的绝对值；上限按面板短边的 45% 兜底，防止填太大把图压成一个点
+        const want = (cfg.sidebar && cfg.sidebar.fitPadding) || SB_FIT_PAD_FALLBACK;
+        return clamp(want, FIT_PAD_LIMIT, short * 0.45);
+      }
       const want = cfg.camera.fitPadding;
-      const bySize = Math.min(cam.W, cam.H) * 0.06;
+      const bySize = short * 0.06;
       return clamp(bySize, FIT_PAD_LIMIT, want);
     }
 
@@ -397,7 +447,9 @@
       rafId = GFI.topWin.requestAnimationFrame(frame);
 
       try {
-        const elapsed = Math.min(cfg.runtime.maxFrameMs, Math.max(0, now - lastTime));
+        const raw = Math.max(0, now - lastTime);
+        const stalled = raw > Math.max(STALL_MIN_MS, medianFrameTime() * STALL_FACTOR);
+        const elapsed = stalled ? DT * 1000 : Math.min(cfg.runtime.maxFrameMs, raw);
         lastTime = now;
         acc += elapsed;
         frameCount++;
@@ -421,22 +473,20 @@
           }
         }
 
-        const vhWorld = cssH / Math.max(0.01, cam.k);
-
         // 模拟子步
         let substeps = 0;
         const maxSub = cfg.runtime.maxSubsteps;
         while (acc >= DT && substeps < maxSub) {
           const awake = P.sim.isAwake();
           if (awake) P.sim.tick(DT);
-          if (P.timeline) P.timeline.update(DT, vhWorld);
+          if (P.timeline) P.timeline.update(DT);
           acc -= DT;
           substeps++;
         }
 
         // 每渲染帧一次特效
         P.fx.update(Math.min(cfg.runtime.maxFrameMs, Math.max(0, elapsed)) / 1000);
-  
+
         if (substeps >= maxSub) acc = 0;
 
         // 拖拽重建网格
@@ -506,6 +556,8 @@
 
         // 测帧耗时
         pushFrameTime(elapsed);
+
+        // lod档更新
         updateLod();
 
         // 空闲检测
@@ -659,17 +711,8 @@
 
       setCutoff(ms) {
         if (!P.timeline) return;
-        P.timeline.setCutoff(ms, { viewportWorldHeight: cssH / Math.max(0.01, cam.k) });
+        P.timeline.setCutoff(ms);
         syncToolbar();
-      },
-
-      pulse(o) {
-        P.fx.pulse(Object.assign({
-          ox: cam.x, oy: cam.y,
-          viewportWorldHeight: cssH / Math.max(0.01, cam.k),
-        }, o || {}));
-        P.sim.reheat(cfg.reheat.pulse);
-        wake();
       },
 
       fitView,
@@ -722,19 +765,29 @@
       destroyed = true;
       running = false;
       stopLoop();
-      try { listeners.removeAll(); } catch (e) {}
-      try { if (P.inter) P.inter.destroy(); } catch (e) {}
-      try { if (P.fx) P.fx.destroy(); } catch (e) {}
-      try { if (P.renderer) P.renderer.destroy(); } catch (e) {}
-      try { toolbar.destroy(); } catch (e) {}
-      try { overlay.unmount(); } catch (e) {}
+      try { listeners.removeAll(); } catch (e) { }
+      try { if (P.inter) P.inter.destroy(); } catch (e) { }
+      try { if (P.fx) P.fx.destroy(); } catch (e) { }
+      try { if (P.renderer) P.renderer.destroy(); } catch (e) { }
+      try { toolbar.destroy(); } catch (e) { }
+      try { overlay.unmount(); } catch (e) { }
       emitter.clear();
-      instance = null;
-      try { delete GFI.topWin.__GFI__; } catch (e) {}
+      // 非主实例挂在自己 root 上的那句 `__gfiApi` 也要摘掉 —— 留着会指向一个
+      // 已经 destroy 的 api，调试时看着像"还活着"，一调就报错。
+      if (root.__gfiApi === api) { try { delete root.__gfiApi; } catch (e) { } }
+      if (instances.get(root) === api) instances.delete(root);
+      // ⚠ 只有主实例才允许摘掉 __GFI__。侧边栏那个实例拆掉时把它删了，
+      //   全屏图谱的控制台入口就凭空消失了（而它还在正常工作）。
+      if (primary === api) {
+        primary = null;
+        try { delete GFI.topWin.__GFI__; } catch (e) { }
+      }
       console.log('[GFI] destroyed', reason || '');
     }
 
-    instance = api;
+    instances.set(root, api);
+    // 第一个挂上的实例默认成为主实例；侧边栏控制器会显式传 primary:false。
+    if (opts.primary !== false && !primary) primary = api;
 
     // 启动 
     if (nativeMode) {
@@ -898,7 +951,6 @@
         全程提示: tl.playDurationSec > 180
           ? `全程 ${(tl.playDurationSec / 60).toFixed(1)} 分钟 —— 嫌久就把「演变节奏」调大（当前 ${GFI.config.timeline.revealRate}/秒）`
           : undefined,
-        出生缓动模式: GFI.config.pop.mode,
         单次出生动画秒: P.fx && P.fx.popDuration ? +P.fx.popDuration().toFixed(3) : 0,
         同时出生动画数: (P.fx && P.fx.popDuration && tl.rate)
           ? +(tl.rate * P.fx.popDuration()).toFixed(2) : 0,
@@ -946,7 +998,7 @@
       // 最远的 15 个
       idx.sort((a, b) => dist[b] - dist[a]);
       const far = idx.slice(0, 15).map((i) => ({
-        标签: String(Dd.label[i]).slice(0, 24),     
+        标签: String(Dd.label[i]).slice(0, 24),
         度数: Dd.deg[i],
         类型: Dd.KIND_NAMES[Dd.kind[i]],
         离质心: Math.round(dist[i]),
@@ -986,7 +1038,7 @@
       L.push('  ' + '标签'.padEnd(26) + '度数'.padEnd(6) + '类型'.padEnd(10) + '离质心');
       for (const r of far) {
         L.push('  ' + String(r.标签).padEnd(26) + String(r.度数).padEnd(6) +
-               String(r.类型).padEnd(10) + r.离质心);
+          String(r.类型).padEnd(10) + r.离质心);
       }
       L.push('');
       L.push('━━━ 度数最高的 8 个（正常应靠近中心）━━━');
@@ -1020,11 +1072,16 @@
       return { summary, far, byDeg };
     }
 
-    // 精简调试入口
+    // 精简调试入口 —— 只由【主实例】发布。
+    // ⚠ 侧边栏那个实例也走这段的话，两边的 api 闭包会互相覆盖同一个 __GFI__，
+    //   后挂上的那块面板说了算 —— 于是"刚打开侧边栏图谱，全屏图谱的控制台
+    //   入口就指向了侧边栏那份数据"。要摸侧边栏那份用 __GFI__.graphs()。
     try {
-      GFI.topWin.__GFI__ = {
+      if (api === primary) GFI.topWin.__GFI__ = {
         version: GFI.VERSION,
         graph: api,
+        /** 当前所有活着的图谱实例（[0] 是全屏，其余是侧边栏面板） */
+        graphs: () => [...instances.values()],
         diag,
         dump,
         tlState,
@@ -1053,7 +1110,6 @@
         stats: () => GFI.Data.stats(api.data),
         sim: () => api.sim,
         data: () => api.data,
-        pulse: (o) => api.pulse(o),
         fit: () => api.fitView(),
         setLod: (n) => api.setLod(n),
         native: (b) => api.setNativeMode(b),
@@ -1063,19 +1119,26 @@
         // 布局预热 
         warm: () => (GFI.Warm ? GFI.Warm.state() : null),
         prewarm: () => (GFI.Warm ? GFI.Warm.prewarm({
-          source: (cfg.runtime||{}).dataSource, demoCount: (cfg.runtime||{}).demoCount,
+          source: (cfg.runtime || {}).dataSource, demoCount: (cfg.runtime || {}).demoCount,
           log: (m) => console.log('[GFI]', m),
         }) : null),
         unwarm: () => { if (GFI.Warm) GFI.Warm.invalidate('__GFI__.unwarm()'); return true; },
+        /** 侧边栏页面图谱的接管开关，如 __GFI__.sidebar(false) 退回原生 */
+        sidebar: (on) => (GFI.setSidebarEnabled ? GFI.setSidebarEnabled(on) : null),
+        /** 侧边栏视野留白（每边 CSS px），如 __GFI__.sidebarFit(64)。完整入口见 __GFI_SIDEBAR__ */
+        sidebarFit: (px) => (GFI.setSidebarFitPadding ? GFI.setSidebarFitPadding(px) : null),
       };
-    } catch (e) {}
+      // 非主实例（侧边栏面板）把 api 挂在自己的 root 元素上 —— 否则它就是一坨
+      // 只能通过 __GFI__.graphs() 摸到的东西，调试时找不到抓手。
+      else root.__gfiApi = api;
+    } catch (e) { }
 
     return api;
   }
 
   // 标定助手
   GFI.calibrate = function calibrate() {
-    const api = instance;
+    const api = primary;
     if (!api) { console.warn('[GFI] 未运行'); return null; }
     const s = GFI.Data.stats(api.data);
     const st = api.stats;
@@ -1100,7 +1163,54 @@
     return { ...s, frame: st };
   };
 
-  GFI.getGraph = () => instance;
+  GFI.getGraph = () => primary;
+  /** 侧边栏那块页面图谱的实例（没挂就是 null） */
+  GFI.getSidebarGraph = () => {
+    const root = GFI.Overlay.findPageGraphRoot && GFI.Overlay.findPageGraphRoot();
+    return root ? (instances.get(root) || null) : null;
+  };
 
-  GFI.Main = { boot, get instance() { return instance; } };
+  /**
+   * 调侧边栏那块的视野留白：`__GFI_SIDEBAR__.fit(64)`
+   *
+   * 留白是纯观感参数，只能靠眼睛定 —— 所以给的是一条"改完立刻看到"的通路，
+   * 而不是"改 config.js → 重载插件 → 再看"那种一轮几十秒的循环。
+   * `fitPad()` 每次适配时【现读】这个值，所以不用重挂实例。
+   *
+   * ⚠ 放在 main.js 而不是 index.js：它只依赖 config 和 getSidebarGraph，
+   *   留在这里才能被无头测试直接调到（index.js 在测试里跑不起来）。
+   *
+   * @param {number} px 每边留白（CSS px）。不传 = 只查询当前值
+   * @returns {number} 当前设置的留白
+   */
+  GFI.setSidebarFitPadding = function setSidebarFitPadding(px) {
+    const side = GFI.config.sidebar = GFI.config.sidebar || {};
+    if (px === undefined || px === null || px === '') return side.fitPadding;
+    const v = Number(px);
+    if (!Number.isFinite(v) || v <= 0) {
+      console.warn(`[GFI] 留白要是正数（收到 ${JSON.stringify(px)}），本次忽略`);
+      return side.fitPadding;
+    }
+    side.fitPadding = v;
+    const api = GFI.getSidebarGraph();
+    if (!api || !api.alive) {
+      console.log(`[GFI] 侧边栏留白 → 每边 ${v}px（侧边栏图谱当前没开，下次打开时生效）`);
+      return v;
+    }
+    if (api.fitViewAnimated) api.fitViewAnimated();      // 立刻能看到效果
+    // ⚠ 报的是【实际生效值】而不是刚设进去的值 —— 它会被
+    //   `clamp(…, 10, 面板短边 × 0.45)` 兜底；调太大时两个数不一样，
+    //   只报后者会让人以为"设了没反应"。
+    const panel = api.overlay && api.overlay.measure ? api.overlay.measure() : null;
+    console.log(`[GFI] 侧边栏留白 → 设置 ${v}px，实际生效 ${api.fitPadding}px`
+      + (panel ? `（面板 ${panel.w}×${panel.h}，绘图区 ${panel.w - 2 * api.fitPadding}×${panel.h - 2 * api.fitPadding}）` : '')
+      + '。满意后把 config.sidebar.fitPadding 写成这个值。');
+    return v;
+  };
+
+  GFI.Main = {
+    boot,
+    get instance() { return primary; },
+    get graphs() { return [...instances.values()]; },
+  };
 })(window.GFI);

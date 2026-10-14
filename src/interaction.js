@@ -21,6 +21,23 @@
   const HIT_BUF = 64;          // 命中候选上限
 
   /**
+   * 「当前活跃画布」—— 键鼠事件只由它处理。
+   *
+   * 为什么需要：`keydown` 是挂在 `GFI.topWin`（窗口）上的，不是挂在 canvas 上的。
+   * 同时接管全屏图谱和侧边栏页面图谱之后，两个实例都会收到同一次按键 ——
+   * 在侧边栏里按 Esc 会把全屏图谱的选中一起清掉（反之亦然）。
+   * 规则：指针进过哪块画布，哪块就是活跃的。
+   *
+   * ⚠ 判据写成「activeCanvas 为空 或 就是自己」—— 空的时候一律放行。
+   *   这样单实例（绝大多数时候）的行为和以前完全一样，不需要用户先把鼠标
+   *   移到画布上才认键盘。创建时也会把空白状态填成第一块画布。
+   */
+  let activeCanvas = null;
+
+  function claimActive(canvas) { activeCanvas = canvas; }
+  function isActive(canvas) { return activeCanvas === null || activeCanvas === canvas; }
+
+  /**
    * @param {HTMLCanvasElement} canvas
    * @param {object} hooks { onNodeActivate(node), onHoverChange(i), onSelectionChange(i), onWake() }
    */
@@ -390,6 +407,8 @@
 
     function onKeyDown(e) {
       if (typingInHost()) return;
+      // 只认活跃画布 —— 否则在侧边栏按 Esc 会连全屏图谱的选中一起清掉
+      if (!isActive(canvas)) return;
       if (e.key === 'Escape') {
         if (state.dragNode >= 0) { cancelDrag(); wake(); }
         else inter.setSelected(-1);
@@ -397,6 +416,11 @@
     }
 
     // -----------------------------------------------------------------------
+    // 指针碰过哪块画布，哪块就是"活跃"的 —— 键盘归它（见 isActive 的说明）
+    reg.add(canvas, 'pointerenter', () => claimActive(canvas));
+    reg.add(canvas, 'pointerdown', () => claimActive(canvas));
+    // 首次创建时把空白状态填上，保证单实例下无脑放行
+    if (activeCanvas === null) activeCanvas = canvas;
     reg.add(canvas, 'pointerdown', onPointerDown);
     reg.add(canvas, 'pointermove', onPointerMove);
     reg.add(canvas, 'pointerup', onPointerUp);
@@ -410,6 +434,9 @@
       cancelDrag();
       reg.removeAll();
       state.pointers.clear();
+      // 活跃画布被拆掉时必须清空 —— 留着一个已经不在 DOM 里的 canvas 会让
+      // 键盘被永久锁死（isActive 对另一块画布恒为 false，Esc 谁都不响应）。
+      if (activeCanvas === canvas) activeCanvas = null;
     };
 
     // 初始：全部正常亮度
