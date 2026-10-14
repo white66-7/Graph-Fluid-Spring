@@ -40,6 +40,11 @@ Graph Inertia takes over graph rendering and replaces it with a **frame-by-frame
 ---
 
 ## Settings
+### Language
+
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| **Language** `language` | `中文` | Panel language. Switches the settings schema and relabels the open panel without reloading the plugin |
 
 ### Physics
 
@@ -57,19 +62,11 @@ Graph Inertia takes over graph rendering and replaces it with a **frame-by-frame
 | **Neighbour Pull** `linkBoost` | `16` | How strongly neighbors follow a dragged node |
 | **Drop Firmness** `releaseAlpha` | `0.05` | Layout activity after release |
 
-### Node Birth
-
-| Parameter | Default | Description |
-| :--- | :---: | :--- |
-| **Pop Overshoot** `popAmp` | `0.55` | Overshoot when a new node appears |
-| **Pop Damping** `popZeta` | `0.30` | Lower = more bounce |
-
 ### Time Travel
 
 | Parameter | Default | Description |
 | :--- | :---: | :--- |
-| **Timelapse Rate** `timelapseRate` | `1` | Nodes revealed per second; invalid input uses auto formula |
-| **Shockwave** `shockMagnitude` | `0` | Strength of the outward repulsion wave as the timeline advances; 0 = disabled |
+| **Timelapse Rate** `timelapseRate` | `slow` | Node reveal speed |
 
 ### Labels
 
