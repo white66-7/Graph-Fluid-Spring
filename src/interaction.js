@@ -72,17 +72,13 @@
 
     const inter = state;
 
-    // =======================================================================
     // 坐标
-    // =======================================================================
     function localPoint(e) {
       const r = canvas.getBoundingClientRect();
       return [e.clientX - r.left, e.clientY - r.top];
     }
 
-    // =======================================================================
     // 命中测试 —— 网格粗筛 + 精确判定
-    // =======================================================================
     function hitTest(sx, sy) {
       const wx = cam.screenToWorldX(sx);
       const wy = cam.screenToWorldY(sy);
@@ -110,9 +106,7 @@
       return best;
     }
 
-    // =======================================================================
     // 邻域高亮（只在 hover 变化时重建，不是每帧）
-    // =======================================================================
     function rebuildHighlight(hot) {
       const hl = D.hl;
       if (hot < 0) { hl.fill(1, 0, D.n); return; }
@@ -143,9 +137,7 @@
       rebuildHighlight(state.hoverIdx >= 0 ? state.hoverIdx : state.selectedIdx);
     };
 
-    // =======================================================================
     // 指针事件
-    // =======================================================================
     function wake() { if (hooks.onWake) hooks.onWake(); }
 
     function onPointerDown(e) {

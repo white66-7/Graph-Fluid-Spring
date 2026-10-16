@@ -112,22 +112,7 @@
     return doc.querySelector('#global-graph');
   }
 
-  /**
-   * 找到右侧边栏里那块「页面图谱」面板。
-   *
-   * 选择器出处（白盒，Local Logseq 2.0.2 `resources/app.asar` 里的编译产物）：
-   *   `szf` 这个渲染函数产出的根节点关键字就是
-   *     `div.page-graph-panel.flex.flex-col.w-full`
-   *   并带了内联尺寸 `{:height "min(72vh, 860px)" :width 560}`；
-   *   它唯一的孩子是 `graph-2d` 组件产出的 `div.graph-canvas` —— 和全屏图谱
-   *   （`div#global-graph.graph-root` 里的那个 `div.graph-canvas`）**是同一个组件**。
-   *
-   * ⚠ 没有限定在 `#right-sidebar` 里查，而是查完再往上验证一句：
-   *   万一将来 Logseq 让用户把页面图谱拖到别处，只按 id 找会直接失效；
-   *   而"存在但不在侧边栏里"是个可以降级的情况，值得认。
-   *   反过来，如果只按 `.page-graph-panel` 找、不做任何校验，某个第三方主题
-   *   恰好用同名类就会误接管 —— 所以这个校验留着。
-   */
+  // 找到右侧边栏里那块「页面图谱」面板。
   function findPageGraphRoot() {
     const doc = GFI.topDoc;
     if (!doc) return null;
@@ -138,30 +123,12 @@
 
 
   // 原生 Pixi 渲染器的暂停与恢复
-  // Logseq 的 Pixi ticker 每帧执行 renderer.render({container: stage})
-  // 不停止会浪费算力
-  //
-  // ⚠⚠ 「被我们盖住的 root」和「被我们停掉的原生 App」必须【按实例】记账，
-  //   不能放模块级变量。原先只有全屏图谱一个实例，放模块级看不出问题；
-  //   接上侧边栏页面图谱（第二块画布）之后，两个实例会互相踩：
-  //   侧边栏接管时把模块级的 takeoverRoot 改掉，全屏那边就再也停不下来
-  //   （或者反过来被 Resume），表现是「两个原生 Pixi 循环一起烧 CPU」——
-  //   而这恰恰是这套机制当初存在的唯一理由。
-  //
-  //   捕获总账 capturedApps 仍然留在模块级 —— 它记的是「见过的所有 Application」，
-  //   与属于哪块面板无关；归属判定（canvas 是否在本实例的 root 里）交给各自的 pause。
   const capturedApps = [];        // 所有见过的 Application（全局总账）
   const liveOverlays = [];        // 已 mount、尚未 unmount 的 overlay 实例
   let captureHook = null;
   let captureInstalled = false;
 
-  /**
-   * 把「所有正在接管的实例各暂停一遍」排到下一个 task。
-   *
-   * ⚠ 必须延后，不能当场调：`Application.init()` 里触发 `__PIXI_APP_INIT__` 的那一刻，
-   *   Pixi 自己的 canvas 还没被 appendChild 进 `.graph-canvas`（宿主是 init 之后
-   *   才挂的），此时 `root.contains(canvas)` 恒为 false —— 当场判会漏掉这个 App。
-   */
+
   function schedulePauseAll() {
     try {
       GFI.topWin.setTimeout(() => {
@@ -310,13 +277,7 @@
     canvas.className = 'gfi-canvas';
     container.appendChild(canvas);
 
-    // 加载屏。默认隐藏
-    //
-    // ⚠ 必须是【不透明】的整块盖屏，不能只是浮在画布上的一行字。
-    //   原因：数据到位之前画布会经历两次视野变化（种子布局上先 fit 一次、
-    //   沉降完成后又缓动一次）。透明的 loader 挡不住它们，用户看到的就是
-    //   "抖两次"；不透明盖屏之后，那两次变化发生在屏后，用户只看到最后那一次。
-    //   底色用图谱自己的背景色（和 canvas 同一个来源），所以收起时不会闪色。
+    // 加载屏默认隐藏
     const loader = doc.createElement('div');
     loader.className = 'gfi-loader';
     loader.hidden = true;

@@ -11,6 +11,12 @@
 
     const range = GFI.Data.timeRange(D);  // 时间范围对象
 
+    if (range) {
+      for (let i = 0; i < D.n; i++) {
+        if (!Number.isFinite(D.createdAt[i])) D.createdAt[i] = range.min;
+      }
+    }
+
     const tl = {
       range,  // 时间戳
       cutoff: range ? range.max : Infinity,   // 当前时刻
@@ -24,10 +30,7 @@
       rateAuto: false,    // 速率自动计算
     };
 
-    const _centroid = { x: 0, y: 0, k: 0 };
-
-    //   GOLDEN = 黄金角 137.5°
-    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+    const _centroid = { x: 0, y: 0, k: 0 };       // 可见图质心 —— 落点锚点
 
     // 时间戳排序
     const sortedTs = (function () {
@@ -79,45 +82,33 @@
     tl.rank = rankUpTo(tl.cutoff);
 
 
-    // 算新节点的落点
-    function anchorFor(i, visCentroid) {
-      // 无可见节点 → 创世
-      if (!visCentroid || visCentroid.k === 0) {
-        const angle = jitter(i, 34, Math.PI);
-        const r = 20 + jitter(i, 35, 30);
-        return {
-          x: Math.cos(angle) * r,
-          y: Math.sin(angle) * r,
-          dirX: Math.cos(angle),
-          dirY: Math.sin(angle),
-        };
+
+    function visibleRadius(D, cen) {
+      let r = 0;
+      for (let i = 0; i < D.n; i++) {
+        if (!D.visible[i]) continue;
+        const dx = D.x[i] - cen.x, dy = D.y[i] - cen.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > r) r = d;
       }
+      return r;
+    }
+
+
+    function anchorFor(i, visCentroid, visRadius) {
+      if (!visCentroid || visCentroid.k === 0) return { x: 0, y: 0 };
 
       // 全图外围
-      const bounds = GFI.Data.bounds(D, true);
-      let outerR;
-      if (!bounds.empty) {
-        const bxc = (bounds.minX + bounds.maxX) * 0.5;
-        const byc = (bounds.minY + bounds.maxY) * 0.5;
-        outerR = Math.max(
-          bounds.maxX - bxc, bxc - bounds.minX,
-          bounds.maxY - byc, byc - bounds.minY
-        );
-      } else {
-        outerR = cfg.physics.linkDistance * 2.2;
-      }
-
       const angle = jitter(i, 32, Math.PI);
-      const margin = cfg.physics.linkDistance * 0.8;
-      const dist = outerR + margin + jitter(i, 33, 20);
+      const outerR = visRadius > cfg.physics.linkDistance ? visRadius : cfg.physics.linkDistance;
+      const dist = outerR + cfg.physics.linkDistance * 0.8 + jitter(i, 33, 20);
 
       return {
         x: visCentroid.x + Math.cos(angle) * dist,
         y: visCentroid.y + Math.sin(angle) * dist,
-        dirX: -Math.cos(angle),
-        dirY: -Math.sin(angle),
       };
     }
+
     // 设置 cutoff
     tl.setCutoff = function setCutoff(ms, opts) {
       opts = opts || {};
@@ -129,8 +120,8 @@
       tl.rank = (opts.rank !== undefined) ? opts.rank : rankUpTo(ms);
       if (!changed && (budget === Infinity || !hasPendingReveal())) return 0;
 
-      const visCentroid = GFI.Data.centroid(D, false, _centroid);
-
+      // 可见图几何（惰性）：<0 表示本轮还没有节点要落位，就不用量
+      let visRadius = -1;
       let revealed = 0, hidden = 0;
 
       // 揭示 / 撤销淡出 / 隐藏
@@ -141,14 +132,26 @@
         if (want === 1 && D.visible[i] === 0) {
           if (revealed >= budget) continue;
 
-          const spawn = anchorFor(i, visCentroid);
+          if (visRadius < 0) {
+            GFI.Data.centroid(D, true, _centroid);
+            visRadius = visibleRadius(D, _centroid);
+          }
+
+          const spawn = anchorFor(i, _centroid, visRadius);
           D.x[i] = spawn.x;
           D.y[i] = spawn.y;
           D.vx[i] = 0;
           D.vy[i] = 0;
-          D.simWeight[i] = 1.0;
 
-          fx.beginReveal(i, 0);
+          if (_centroid.k) {
+            const dx = spawn.x - _centroid.x, dy = spawn.y - _centroid.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d > visRadius) visRadius = d;
+          } else {
+            visRadius = -1;   // 创世
+          }
+          
+          fx.beginReveal(i);
           revealed++;
         } else if (want === 1 && D.visible[i] === 1 && isFading) {
           if (fx.cancelHide(i)) revealed++;

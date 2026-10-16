@@ -88,7 +88,7 @@
     const m = links.length;
 
     // 创建
-    const D = { 
+    const D = {
       n,  // 节点数
       m,  // 边数
       nodes, // 节点数组
@@ -98,13 +98,13 @@
       KIND_NAMES,  // 类名
 
       // 节点 ID
-      id: new Array(n),  
+      id: new Array(n),
       // 节点标题
       label: new Array(n),
       kind: new Uint8Array(n),
       colorIdx: new Uint8Array(n),
       // 调色板
-      colorTable: [],         
+      colorTable: [],
       // 度数-节点连了多少条边
       deg: new Uint16Array(n),
       // 节点半径(随度数变大)
@@ -148,11 +148,9 @@
       // 缩放倍率
       scaleMul: new Float32Array(n),
       // 出生动画进度
-      popT: new Float32Array(n),      
-      // 出生动画总长
-      popDur: new Float32Array(n),
+      popT: new Float32Array(n),
       // 淡出
-      fadeT: new Float32Array(n),    
+      fadeT: new Float32Array(n),
       fadeFrom: new Float32Array(n),
 
       // 边
@@ -166,7 +164,7 @@
 
       // hover 时高亮邻域
       // 0=压暗 1=邻接 2=自身
-      hl: new Uint8Array(n),          
+      hl: new Uint8Array(n),
     };
 
     // 后续分配
@@ -222,6 +220,14 @@
       D.hl[i] = 1;
     }
 
+    const tsSeen = new Map();
+    for (let i = 0; i < n; i++) {
+      const t = D.createdAt[i];
+      if (!Number.isFinite(t)) continue;
+      const c = tsSeen.get(t) || 0;
+      if (c > 0) D.createdAt[i] = t + c;
+      tsSeen.set(t, c + 1);
+    }
 
     // 度数
     for (let e = 0; e < m; e++) {
@@ -252,7 +258,7 @@
       D.radius[i] = clamp(rcfg.radiusBase + rcfg.radiusScale * sd, rcfg.radiusMin, rcfg.radiusMax) * rcfg.nodeSize;
 
       // 斥力随度数增长
-      const gain = 1 + cfg.chargeDegGain * sd; 
+      const gain = 1 + cfg.chargeDegGain * sd;
       // 斥力是负数,有上下限
       D.charge[i] = -Math.abs(cfg.charge) * Math.min(gain, cfg.chargeDegCap);
     }

@@ -172,7 +172,7 @@
               // 平均电荷
               const swj = simWeight[j];
               const cj = Math.abs(charge[j]) * swj;
-              const cAvg = (ci + cj) * 0.5;
+              const cAvg = Math.min(ci, cj);
 
               let mag;
               if (falloff === 0) {
@@ -266,13 +266,13 @@
       cx /= k; cy /= k;
       if (count === 0) { isoCount = 0; return; }
 
-      let maxR = 0;
+      let maxR = cfg.linkDistance * 0.5;
+
       for (let i = 0; i < n; i++) {
         if (deg[i] === 0 || !activeMask[i]) continue;
         const d = Math.hypot(x[i] - cx, y[i] - cy);
         if (d > maxR) maxR = d;
       }
-      if (maxR < 1) maxR = 1;
 
       const targetR = maxR * rc.factor;
       const pull = rc.strength;

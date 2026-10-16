@@ -122,9 +122,7 @@
       return l === ALPHA_LEVELS - 1 ? 1 : (l + 0.5) / (ALPHA_LEVELS - 1);
     }
 
-    // -----------------------------------------------------------------------
-    // 尺寸 / DPR
-    // -----------------------------------------------------------------------
+    // 屏幕刷新率
     function resize(cssW, cssH, newDpr) {
       if (newDpr !== undefined && newDpr !== dpr) {
         dpr = newDpr;
@@ -150,13 +148,12 @@
       if (D.m > edgeList.length) edgeList = new Int32Array(D.m);
     }
 
-    // -----------------------------------------------------------------------
-    // 辉光精灵
-    // -----------------------------------------------------------------------
+    // 辉光精灵图
     function makeGlowSprite(hex) {
       const rgb = hexToRgb(hex);
+      // 辉光相对节点半径的外扩倍数
       const spread = rcfg.glowSpread;
-      // 精灵按最大桶尺寸渲染，绘制时缩放到目标尺寸 —— 这样每种颜色只需要一张
+      // 精灵按最大桶尺寸渲染，绘制时缩放到目标尺寸
       const rCss = BUCKETS[BUCKETS.length - 1];
       const size = Math.max(4, Math.ceil(2 * spread * rCss * dpr));
       const c = topDoc.createElement('canvas');
@@ -179,20 +176,13 @@
       return s;
     }
 
-    // -----------------------------------------------------------------------
     // 标签精灵
-    // -----------------------------------------------------------------------
     function makeLabelSprite(text) {
-      // 必须先量宽度再建画布 —— 尺寸要按内容裁，不然几百个标签就是几百张
-      // 全宽的图，内存全浪费。量之前显式设一次 font，不依赖外面设过。
       ctx.font = rcfg.labelFont;
       const wCss = Math.ceil(ctx.measureText(text).width) + labelPad * 2;
       const hCss = labelBoxH;
 
-      // ⚠ 设备像素必须取【整】，且对外暴露的 CSS 尺寸要由它【除回来】。
-      //   若按 w*dpr 取浮点再 ceil，drawImage 的目标尺寸（w × dpr）就与源尺寸
-      //   差最多 1px —— 于是每次 blit 都触发一次双线性重采样，文字发虚。
-      //   除回来之后 dw*dpr === canvas.width，是严格 1:1。
+      // 设备像素必须取整
       const devW = Math.max(1, Math.round(wCss * dpr));
       const devH = Math.max(1, Math.round(hCss * dpr));
 
@@ -201,9 +191,9 @@
       const g = c.getContext('2d');
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.font = rcfg.labelFont;
-      // 精灵内部文字【左对齐】、文字左缘 = labelPad。
-      // 外面按"精灵左缘居中到节点圆心"摆放（见 drawOne），文字因此也居中。
+      // 文字左对齐
       g.textAlign = 'left';
+      // 
       g.textBaseline = 'middle';
       g.lineJoin = 'round';
       g.miterLimit = 2;
@@ -335,9 +325,7 @@
       const tCore = GFI.util.now();
 
       labelDrawn = 0;
-      // 🌟 L3 全局淡变系数：main.js 按【缩放的连续函数】算出目标再叠时间补间（0..1）。
-      //   未传 = 1（直调/旧行为）。lblPrevFade 必须每帧都记 —— 即使本帧整层跳过，
-      //   否则 0→正 的上升沿在下一次 drawLabels 里就探测不到了。
+      // 全局淡变系数
       const lf = view.labelFade;
       labelFadeMul = lf === undefined ? 1 : (lf > 0 ? (lf < 1 ? +lf : 1) : 0);
       const fadeRising = labelFadeMul > 0 && lblPrevFade <= 0;
@@ -431,7 +419,8 @@
           ctx.lineTo(cam.worldToScreenX(x[t]), cam.worldToScreenY(y[t]));
           nb++;
         }
-        if (nb) ctx.stroke();          // 全被抽去逐条淡入时别描空气
+        // 全被抽去逐条淡入时别描空气
+        if (nb) ctx.stroke();         
         drawFadingEdges(fn, wNormal, wHi);
         return;
       }
@@ -608,16 +597,11 @@
     }
 
     // 标签
-    // （原有一个 measure() + measureText 缓存，从未被任何地方调用过 —— 已经删掉。
-    //   宽度现在由 labelCache 的精灵条目一并提供，见文件上方 makeLabelSprite。）
     function drawLabels(list, count, lodCfg, k, hot, fadeRising) {
       if (!count) return;
       labelFrame++;      // 精灵缓存的"最近使用"时间戳
 
-      // ---- 🌟 L2 失效检测（必须先于一切 labelShown 的使用）----
-      // 相机 k 突变（>10%）/ 平移突变（>40px）/ 淡变上升沿 → 上一帧的胜者
-      // 集合整体作废：宁可让标签按名次重排一帧（有 L1 渐变兜底，不闪），
-      // 也不让陈旧胜者挂在已经对不上的位置上。
+      // 失效检测
       const tx0 = cam.worldToScreenX(0), ty0 = cam.worldToScreenY(0);
       const jumped = !lblInit
         || Math.abs(k - lblK) > 0.1 * Math.max(1e-9, lblK)
@@ -627,10 +611,7 @@
       lblInit = true; lblK = k; lblTx = tx0; lblTy = ty0;
       if (jumped) labelShown.fill(0, 0, D.n);
 
-      // 占位网格 —— 两种策略都要用：
-      //   labelYield = true  → 判"谁赢"（重叠的藏起来）
-      //   labelYield = false → 判"谁该变暗"（重叠的照画但压暗）
-      // 所以这里不再按开关跳过分配。
+      // 
       const cell = rcfg.labelCell;
       const cw = Math.ceil(W / cell), ch = Math.ceil(H / cell);
       if (cw !== occW || ch !== occH) {

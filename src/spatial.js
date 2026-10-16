@@ -160,10 +160,8 @@
       return outN;
     };
 
-    /**
-     * 命中测试：返回世界坐标 (x,y) 附近 tol 半径内的候选节点。
-     * 只做粗筛，精确判定（含每节点半径）交给调用方。
-     */
+
+     //  命中测试：返回世界坐标 (x,y) 附近 tol 半径内的候选节点
     grid.collectRadius = function collectRadius(D, x, y, r, out, mask) {
       const cols = grid.cols, rows = grid.rows;
       if (!cols || !rows) return 0;

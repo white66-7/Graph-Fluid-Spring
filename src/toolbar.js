@@ -67,7 +67,7 @@
     timeWrap.appendChild(slider);
     made.push(slider);
 
-    // ---- 类型开关 ----
+    // 类型开关 
     el('div', 'gfi-sep');
     const KINDS = [
       { idx: 0, label: '页面' },

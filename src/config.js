@@ -16,7 +16,7 @@
       linkStrength: 0.5,      // 边刚度
       velocityRetain: 0.60,   // 每帧速度保留率
       settleTicks: 400,       // alpha 1→alphaMin 的 tick 数
-      collideStrength: 1.0,   // 重叠消解强度（1 = d3 forceCollide 约定：每遍完全解消）
+      collideStrength: 1.0,   // 重叠消解强度
       collidePad: 10,
       skipIsolatedCharge: true,
       gravityDeadzone: 40,    // 死区半径
@@ -24,7 +24,7 @@
       gravityDegGain: 0.5,
       centerStrength: 0.02,   // 刚性回正
       alphaMin: 0.001,
-      collideCell: 48,        // 碰撞微网格边长（容纳放大后的 hub 节点）
+      collideCell: 48,       // 碰撞微网格边长（容纳放大后的 hub 节点）
       hubLinkThreshold: 5,   // hub边际
       hubLinkBoost: 3,       // hub-hub 边刚度倍率
       // 零度节点

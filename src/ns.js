@@ -105,6 +105,7 @@
 
   // 颜色
   function hexToRgb(hex) {
+    // 判断第一个字符是不是'#'
     const h = hex.charCodeAt(0) === 35 ? hex.slice(1) : hex;
     const v = parseInt(h.length === 3
       ? h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
