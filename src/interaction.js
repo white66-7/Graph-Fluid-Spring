@@ -1,19 +1,3 @@
-/*
- * GFI.Interaction — 指针 / 滚轮 / 键盘
- * 因为我们拥有 overlay canvas 并用 setPointerCapture，这里全是自己元素上的
- * 【普通事件处理】。v1 那套 capture 阶段的 topWin 监听 + WebGL uniformMatrix3fv
- * 补丁 + 合成 PointerEvent 傀儡，全部不再需要。
- *
- * 命中测试复用物理的均匀网格：模拟醒着时每 tick 重建，睡着时【沿用上一次的】——
- * 纯相机操作期间没有任何东西移动，那张旧网格恰好是精确的，所以平移缩放零成本。
- *
- * 拖拽 = d3-drag 的语义（dragstart 抬 alphaTarget / drag 写 fx,fy / dragend 归零），
- * 外加两个白盒实测出来的补丁（依据见 test/drag-probe.js）：
- *   · 拖动期间 sim.setDragLinkBoost(i, cfg.drag.linkBoost)
- *     —— 只给被拖节点的关联边加刚度，让邻居跟着走，图不被扯裂
- *   · 松手时把 alpha 压到 cfg.drag.releaseAlpha
- *     —— 回弹幅度几乎正比于松手后的 alpha，压低它节点才停得住
- */
 (function (GFI) {
   'use strict';
   if (GFI.Interaction) return;

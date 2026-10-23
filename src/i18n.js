@@ -4,6 +4,7 @@
   if (GFI.i18n) return;
 
   const LANGS = ['zh', 'en'];
+
   const DEFAULT_LANG = 'zh';
 
   // 节奏档位
@@ -15,17 +16,22 @@
 
   let lang = DEFAULT_LANG;
 
-  function t(cb, force) {
-    const L = force || lang;
+
+  // 传入要翻译的内容和语言
+  function t(cb) {
+    const L = lang;
     if (cb === undefined || cb === null) return '';
-    if (typeof cb === 'string') return cb;          // 直接给字符串
+    // 直接给字符串
+    if (typeof cb === 'string') return cb;
     return cb[L] !== undefined ? cb[L] : (cb.zh !== undefined ? cb.zh : '');
   }
 
+  // 归一化为en与zh值
   function normalize(v) {
     if (typeof v === 'number' && Number.isFinite(v)) {
       return LANGS[v] || DEFAULT_LANG;
     }
+
     const s = String(v === undefined || v === null ? '' : v).trim().toLowerCase();
     if (s === '') return DEFAULT_LANG;
     if (s === '1' || s === 'en' || s === 'english' || s === 'en-us') return 'en';
@@ -37,6 +43,7 @@
   }
 
   function set(v) { lang = normalize(v); return lang; }
+
   function get() { return lang; }
 
 
@@ -225,23 +232,22 @@
     },
   ];
 
-  /**
-   * 把文案表编译成 Logseq 的 schema
-   * @param {object[]} [entries] 
-   */
+  // 编译成 Logseq 要的格式
   function schema(entries) {
     const src = entries || SCHEMA;
     return src.map((e) => {
       const out = {};
       for (const k in e) {
         if (k === 'title') out.title = t(e.title);
-        else if (k === 'short') { /* 不直接进 schema */ }
+        else if (k === 'short') {
+          out.description = t(e.short);
+        }
         else out[k] = e[k];
       }
-      out.description = t(e.short);
       return out;
     });
   }
+
 
   function audit(entries) {
     const src = entries || SCHEMA;
@@ -283,10 +289,9 @@
     return false;
   }
 
-  /**
-   * 就地把面板上的文案换成当前语言。
-   * @returns {number} 改写条数
-   */
+
+
+  // 直接控制改写宿主页面的渲染
   function relabelPanel(opts) {
     const doc = GFI.topDoc;
     if (!doc || !doc.querySelectorAll) return opts && opts.debug ? { hits: 0, scanned: 0, missed: [] } : 0;
@@ -341,7 +346,7 @@
   }
 
   GFI.i18n = {
-    t, set, get, normalize, schema, audit, SCHEMA, LANGS, DEFAULT_LANG, ENUM_CHOICES,RATE_CHOICES, RATE_VALUES,
+    t, set, get, normalize, schema, audit, SCHEMA, LANGS, DEFAULT_LANG, ENUM_CHOICES, RATE_CHOICES, RATE_VALUES,
     relabelPanel, norm, inSettingsPanel, hasInteractive,
   };
 })(window.GFI = window.GFI || {});

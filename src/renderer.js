@@ -18,33 +18,31 @@
     let W = 1, H = 1;                 // CSS 像素尺寸
     let bgColor = rcfg.bgFallback;
 
-    // 所有可见节点的索引
+    // 这一帧要画的节点下标
     let nodeList = new Int32Array(Math.max(64, D.n));
+    // 这一帧要画的边下标
     let edgeList = new Int32Array(Math.max(64, D.m));
     let nodeCount = 0, edgeCount = 0;
 
-    // 剔除复用物理的空间网格。模拟睡着时网格是上一次构建的 —— 那种情况下
-    // 没有任何东西移动过，所以那张旧网格恰好是精确的，平移缩放零成本。
+    // 剔除复用物理的空间网格
     let cullGrid = null;
 
-    // 标签精灵缓存 —— key = 最终显示的字符串（已按 labelMaxChars 截断）。
-    // 标签在屏幕空间的字体 / 颜色 / 字号是恒定的（不随相机 k 变化），所以每个
-    // unique 字符串只需光栅化一次，之后每帧一次 drawImage 取代 strokeText +
-    // fillText（后者每帧都要把每个字形轮廓重新描一遍边）。
-    // 240 个标签 × ~15 字符 ≈ 7200 次字形描边/填充 → 240 次 blit。
-    // 条目同时带着宽度，所以顺带取代了原先那个【从未被调用过的】measureText 缓存。
+    // 标签精灵缓存
     const labelCache = new Map();
+    // 帧计数器
     let labelFrame = 0;
+    // 标签绘制数
     let labelDrawn = 0;
 
-    // 标签精灵的尺寸基准。
-    // pad 用于容纳 halo 描边的外溢；高度取【行高】而不是逐字符串的实际字形高 ——
-    // 否则 "abc" 与 "Äg" 会得到不同的精灵高度，画出来基线互相错位。
-    let labelPad = 4, labelBoxH = 24;
-    // 标签【文字】与节点下缘之间的间隙（屏幕像素）。摆设方式见 drawOne：名字在节点正下方。
-    // ⚠ 这是"文字下缘到节点下缘"的距离 —— 精灵盒的透明 padding 不计入，
-    //   否则每个标签看起来都会飘在节点下方，认不出属于哪个节点。
+    // 精灵盒四周的透明 padding
+    let labelPad = 4;
+    // 精灵盒的高度
+    var labelBoxH = 24;
+
+    // 标签文字与节点下缘之间的间隙
     const LABEL_GAP = 3;
+
+
     function refreshLabelMetrics() {
       const m = /(\d+(?:\.\d+)?)px/.exec(rcfg.labelFont);
       const size = m ? parseFloat(m[1]) : 12;
@@ -53,30 +51,20 @@
     }
     refreshLabelMetrics();
 
-    // 标签占位网格（抑制密集处互相糊）
     let occW = 0, occH = 0;
+    // 记录每个格子是否已被某个标签占用
     let occGrid = new Uint8Array(0);
-
-    // 🌟 L1/L2 标签时序状态（按节点，随本管线的数据 D 一次性分配）：
-    //   labelA    当前 alpha（0..1）。胜者每帧爬升 RISE，败者/未遍历者衰减 FALL ——
-    //             标签的进出从「啪地出现/消失」变成 ~100/70ms 的交叉渐变。
-    //   labelShown 上一帧的胜者集合（滞回）：本帧先画它们（H 遍）再让新候选补位
-    //             （N 遍）—— 占位格每帧清零，竞争胜负原本完全由「空间序」决定，
-    //             漂移/平移时节点跨格，胜负帧间翻转 → 标签一闪一闪。
-    //   labelWon  本帧胜出标记，收尾扫描时滚入 labelShown。
-    //   RISE/RISE_HI/FALL 是每帧步进（60fps 下 ≈100/50/67ms）；渲染循环不需要
-    //   真实 dt —— 精灵 alpha 的渐变对帧率不敏感。
+    
+    // 节点 i 的标签当前透明度
     let labelA = new Float32Array(D.n);
     let labelShown = new Uint8Array(D.n);
     let labelWon = new Uint8Array(D.n);
     const RISE = 1 / 6, RISE_HI = 1 / 3, FALL = 1 / 4;
 
-    // 🌟 L3 全局淡变系数：main.js 对 labelsOn 布尔滞回做 alpha 补间后传入 view，
-    //   ≤0 时整层跳过。0→正数的上升沿会把胜者集合作废（离屏期间布局可能漂了）。
+    // 全局淡变系数
     let labelFadeMul = 1, lblPrevFade = -1;
 
-    // 🌟 L2 相机突变检测：k 变化 >10% 或平移 >40px 时胜者集合整体作废 ——
-    //   宁可重排一帧（有 L1 渐变兜底，不闪），也不让陈旧胜者挂在不存在的位置上。
+    // 相机突变检测。
     let lblK = 0, lblTx = 0, lblTy = 0, lblInit = false;
 
     // 精灵缓存
@@ -94,9 +82,6 @@
 
     const rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
-    // 节点头的分桶：colorIdx × 8 级 alpha × 2 级明暗。
-    // 为什么不用逐节点 globalAlpha —— 一次 fill() 只能有一个 alpha，
-    // 逐节点画会退化成 3000 次 fill。计数排序把它们重新聚成几十个批次。
     const ALPHA_LEVELS = 8;
     let bucketCount = new Uint32Array(0);
     let bucketStart = new Uint32Array(0);
@@ -193,21 +178,23 @@
       g.font = rcfg.labelFont;
       // 文字左对齐
       g.textAlign = 'left';
-      // 
+      // 文字垂直对齐基准
       g.textBaseline = 'middle';
+      // 描边转角处
       g.lineJoin = 'round';
-      g.miterLimit = 2;
 
+      // 中线测量
       const ty = devH / dpr * 0.5;
-      // 先描边再加字 —— 深色光晕把文字从辉光背景里"抠"出来（与主 ctx 同一套参数）
+
+      // 先描边再加字
       if (rcfg.labelHaloWidth > 0) {
+        // 颜色
         g.strokeStyle = rcfg.labelHaloColor;
         g.lineWidth = rcfg.labelHaloWidth;
         g.strokeText(text, labelPad, ty);
       }
       g.fillStyle = rcfg.labelColor;
       g.fillText(text, labelPad, ty);
-
       return { canvas: c, w: devW / dpr, h: devH / dpr };
     }
 
@@ -245,7 +232,7 @@
     function invalidateSprites() {
       spriteCache.clear();
       labelCache.clear();
-      refreshLabelMetrics(); 
+      refreshLabelMetrics();
       labelA.fill(0, 0, D.n);
       labelShown.fill(0, 0, D.n);
       labelWon.fill(0, 0, D.n);
@@ -298,7 +285,7 @@
       ctx.globalAlpha = 1;
 
       // 清屏
-      ctx.clearRect(0, 0, W, H);  
+      ctx.clearRect(0, 0, W, H);
       if (!D.n) return { cull: 0, total: GFI.util.now() - t0 };
 
       cull(rcfg.radiusMax * rcfg.nodeSize * rcfg.glowSpread + 16);
@@ -325,6 +312,7 @@
       const tCore = GFI.util.now();
 
       labelDrawn = 0;
+
       // 全局淡变系数
       const lf = view.labelFade;
       labelFadeMul = lf === undefined ? 1 : (lf > 0 ? (lf < 1 ? +lf : 1) : 0);
@@ -357,22 +345,8 @@
       };
     }
 
-    // -----------------------------------------------------------------------
-    // 边：三个色类 → 最多 3 次 stroke()
-    // -----------------------------------------------------------------------
-    // 🌟 正在淡入的边（两端 renderAlpha 都还没到 1）单独画。
-    //
-    //   为什么必须这么做：Obsidian 的【边也在缓动】—— app.js 连边类 render() 里
-    //     `n.alpha = uZ(n.alpha, c)`，初始值是 initGraphics 给的 cZ·颜色alpha
-    //     （cZ = 0.2，即只有两成），再逐帧缓动到满。
-    //   而我们是一条 path 一次性 stroke 全亮度，且边的可见性是二值的
-    //   （visible[] 在 beginReveal 里【立刻】置 1）—— 于是出生那一帧画面上会冒出
-    //   【一条满亮度的线，挂在一个 alpha 才 0.1、几乎看不见的节点上】。
-    //   这比节点本身还刺眼，也是「还是突然」的最后一个来源。
-    //
-    //   边 alpha 取两端 renderAlpha 的 min ⇒ 边跟着【较晚出现】的那一端一起淡入。
-    //   稳态里两端都是 1，走原来的批量路径，一帧不多花。
-    const fadingEdges = [];        // [edge, alpha, style, …]  style: 0 普通 / 1 压暗 / 2 高亮
+    // 边的 alpha = 两端节点 alpha 的 min
+    const fadingEdges = [];        // style: 0 普通 / 1 压暗 / 2 高亮
     function edgeAlpha(e) {
       const ra = D.renderAlpha, a = ra[D.lsrc[e]], b = ra[D.ltgt[e]];
       return a < b ? a : b;
@@ -420,7 +394,7 @@
           nb++;
         }
         // 全被抽去逐条淡入时别描空气
-        if (nb) ctx.stroke();         
+        if (nb) ctx.stroke();
         drawFadingEdges(fn, wNormal, wHi);
         return;
       }
@@ -623,15 +597,9 @@
 
       const { x, y, label, labelRank, radius, renderAlpha, scaleMul, visible, hl, kind } = D;
       const JK = D.KIND.journal;
-      // 🌟 日记默认不显示名字（config.render.labelJournal，Obsidian 式）。
-      // 只作用于常态模式 B —— 悬浮（模式 A）不受影响：想读某颗绿点是哪天，
-      // hover 一下就行，那一刻正是"要读名字"的时候。
+      // 日记默认不显示名字
       const journalLabelsOn = !!rcfg.labelJournal;
       const n = D.n;
-      // labelRank 是均匀分布在 0..255 的名次（0 = 度数最高）；据此换算阈值按名次截断。
-      // 取两个上限的较小者：LOD 档位的 labelCap，以及按节点总数算的比例上限。
-      // 🌟 labelMaxRatio 默认 1.0（Obsidian 行为：全部节点都是候选）之后，
-      //   rankCap 基本恒为 255 —— 名次分档只剩"先画谁"的作用（占位让位时 hub 优先）。
       const cap = Math.min(lodCfg.labelCap, Math.max(8, Math.round(n * rcfg.labelMaxRatio)));
       const rankCap = n > 1 ? Math.min(255, Math.floor((cap / (n - 1)) * 255)) : 255;
 
@@ -639,23 +607,11 @@
       ctx.strokeStyle = rcfg.labelHaloColor;
       ctx.lineWidth = rcfg.labelHaloWidth;
       ctx.lineJoin = 'round';
-      ctx.miterLimit = 2;
-      // 🌟 Obsidian 摆放：文字左对齐（resize 里的全局默认是 center）
+      // 文字左对齐
       ctx.textAlign = 'left';
 
-      // ---- 模式 A：悬浮/选中时，只显示该节点与它直接相连的邻居 ----
-      // 这是一条明确的规则，而不是"按名次截一部分"——
-      // 视线聚焦在邻域上，其余标签全部让位。
+      // 悬浮显示该节点与它直接相连的邻居
       if (hot >= 0) {
-        // ⚠ 邻域模式【全部不做重叠让位】（force=true）。
-        //   意图是"视线聚焦在邻域上，其余全部让位" —— 那么邻域内部自己就该
-        //   全部显示。之前这里让位，而占位抑制改按整个包围盒标记之后，hub 的
-        //   邻居们（它们本来就聚在一起）开始真的互相挤掉，看起来就是
-        //   "悬浮后连接的节点显示不全"。**让位只属于常态模式。**
-        // 🌟 L1：非邻域标签不再走 return 短路 —— 收尾扫描会把它们的 alpha
-        //   衰减到 0（~70ms 淡出），悬浮切换从「其余标签啪地消失」变成渐隐；
-        //   收尾扫描同时会把 labelShown 清到只剩邻域 —— 退出悬浮后从干净
-        //   状态按名次重建，不会挂陈旧胜者。
         if (visible[hot]) drawOne(hot, cell, cw, ch, x, y, label, radius, scaleMul, k, true, true);
         for (let p = 0; p < count; p++) {
           const i = list[p];

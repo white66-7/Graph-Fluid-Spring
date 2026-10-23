@@ -6,16 +6,9 @@
   const { clamp } = GFI.util;
   const DT = GFI.DT;
 
-  // 图谱实例表：一个 root 一个实例。
-  //
-  // 为什么要有它：我们【同时】接管两块面板 —— 全屏图谱（`#global-graph`）和
-  // 右侧边栏的页面图谱（`.page-graph-panel`）。它们是两个独立的 root、两个独立的
-  // Pixi Application、两套节点数据，所以必须是两个实例。
-  // ⚠ 原先这里只有 `let instance`，`boot()` 第二行就是 `if (instance) return instance`
-  //   —— 侧边栏想挂载会直接拿到全屏那个实例，画到别人的 canvas 上去。
+  // 图谱实例表
   const instances = new Map();     // HTMLElement root → api
-  // 主实例（全屏图谱）。`GFI.getGraph()` / `__GFI__` / 设置面板的热更新都只看它 ——
-  // 侧边栏那份是它的"缩小版跟随者"，不该被当成全局状态的主人。
+  // 主实例
   let primary = null;
 
   function createPipeline(overlay, cam, nodes, links, prevD, layout) {
@@ -466,7 +459,7 @@
             markDirty();
           }
           if (!overlay.canvas.isConnected) { destroy('overlay detached'); return; }
-          // 主题可能变了 —— 轮询比监听更可靠（Logseq 没有稳定的主题事件）
+          // 主题变化查询
           if (frameCount % (cfg.runtime.degenerateCheckEvery * 4) === 0) {
             const bg = overlay.readBackground();
             if (bg !== renderer.bgColor) renderer.setBackground(bg);
@@ -486,7 +479,6 @@
 
         // 每渲染帧一次特效
         P.fx.update(Math.min(cfg.runtime.maxFrameMs, Math.max(0, elapsed)) / 1000);
-
         if (substeps >= maxSub) acc = 0;
 
         // 拖拽重建网格
@@ -1159,7 +1151,7 @@
     const ratio = s.p50LinkLen / GFI.config.physics.linkDistance;
     if (ratio < 1.2) console.log('%c→ p50 边长偏短，把 charge 调小一点或 linkDistance 调大', 'color:#c80');
     else if (ratio > 1.6) console.log('%c→ p50 边长偏长，把 charge 调大', 'color:#c80');
-    else console.log('%c✔ p50 边长落在 1.2~1.6 × linkDistance,达标', 'color:#0a0');
+    else console.log('%c✔ p50 边长落在 1.2~1.6 X linkDistance,达标', 'color:#0a0');
     return { ...s, frame: st };
   };
 

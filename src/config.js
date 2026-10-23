@@ -279,6 +279,8 @@
     revealAnimMs: (v) => v >= 0 && v <= 2000,
   };
 
+
+  // 在index.js调用
   GFI.syncSettings = function syncSettings(s) {
     const c = GFI.config;
     const d = GFI.configDefaults;
