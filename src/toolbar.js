@@ -7,6 +7,7 @@
     play: '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg>',
     pause: '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>',
     fit: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>',
+    camera: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>'
   };
 
   function fmtDate(ms) {
@@ -87,6 +88,10 @@
     el('div', 'gfi-sep');
     const fitBtn = button('适配视野', SVG.fit);
 
+    const shotBtn = button('保存截图', SVG.camera);
+
+
+
     // ---- 事件 ----
     let scrubbing = false;
 
@@ -97,6 +102,10 @@
     fitBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (hooks.onFit) hooks.onFit();
+    });
+    shotBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (hooks.onSnapshot) hooks.onSnapshot();
     });
 
     slider.addEventListener('pointerdown', (e) => { e.stopPropagation(); scrubbing = true; });
@@ -142,7 +151,7 @@
 
       fmtDate,
       destroy() {
-        for (const n of made) { try { n.remove(); } catch (e) {} }
+        for (const n of made) { try { n.remove(); } catch (e) { } }
         made.length = 0;
       },
     };
@@ -152,8 +161,8 @@
 
   function createNull() {
     return {
-      setPlaying() {}, setProgress() {}, setLabel() {}, setKinds() {},
-      setTimeTravelAvailable() {}, fmtDate, destroy() {},
+      setPlaying() { }, setProgress() { }, setLabel() { }, setKinds() { },
+      setTimeTravelAvailable() { }, fmtDate, destroy() { },
     };
   }
 

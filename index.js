@@ -212,7 +212,7 @@
       const sync = GFI.Warm.settleNow(data.nodes, data.links, req);
       if (sync) {
         GFI.Overlay.record('布局来源',
-          `同步抢跑 ${sync.costMs}ms（查库等待 ${Math.round(waited)}ms）`);
+          `同步抢跑 ${sync.costMs}ms 查库等待 ${Math.round(waited)}ms`);
         return { layout: sync.layout, playReveal: true };
       }
       GFI.Overlay.record('布局来源', '抢跑超预算，回退即时沉降');
@@ -220,7 +220,7 @@
     }
 
     // 预热正在跑
-    console.log('[GFI] 预热正在跑，等它跑完再装载（loader 亮着）');
+    console.log('[GFI] 预热正在跑,等它跑完再装载');
     GFI.Overlay.record('布局来源', '等待后台预热完成');
     const entry = await GFI.Warm.pending(key);
     return { layout: entry ? entry.layout : null, playReveal: true };

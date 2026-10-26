@@ -59,7 +59,7 @@
     const overlay = GFI.Overlay.mount(root, { nativeVisible: deferTakeover });
     if (!overlay) return null;
 
-    // ⚠ 不要工具栏的那条路必须把【容器元素本身】也摘掉。
+    // 不要工具栏的那条路必须把【容器元素本身】也摘掉。
     //   `.gfi-toolbar` 是个有背景色、圆角、内边距的浮动胶囊 ——
     //   只把里面塞空的话，面板底部会挂着一个空的小黑条。
     if (!wantToolbar) { try { overlay.toolbar.remove(); } catch (e) { } }
@@ -86,68 +86,40 @@
     let rafId = null;
     let lastTime = 0;
     let acc = 0;
+
+    // 静止帧累计
     let idleFrames = 0;
     let running = true;
     let errorCount = 0;
     let frameCount = 0;
     let labelsOn = false;
-    let labelFade = 0;              // 🌟 L3：标签层全局 alpha 补间（0..1）
+    let labelFade = 0;
     let lodLevel = 1;
     let lodForced = -1;
     let lastStats = null;
-    // 本次数据装载是不是「一步到位」的（吃到了沉降布局）。
-    // 为 true 时关掉所有相机缓动、并让标签层直接以终值出现 —— 见 setData。
+
     let instantReveal = false;
-    // 当前这一轮显现淡入的总时长（ms，>0 表示淡入真的在跑）。
-    // ⚠ 不能用 instantReveal 代替它：instantReveal 说的是"布局是沉降好的"，
-    //   而"有没有淡入"取决于调用方传的 reveal（缓存命中时不淡入）。
-    //   实机日志里就因为混用而把「首帧（预热布局，无缓动）」记成了一次带淡入的
-    //   交接 —— 探针的措辞自相矛盾，排查时会被误导。
+    // 显现淡入的总时长
     let revealDurMs = 0;
 
-    // ---- 交接状态（见 setData / frame / setNativeMode 三处）----
-    // boot() 是在【数据还没到】的时候挂载的，而容器已经在显示、原生图谱已经被
-    // 藏掉（见上面的 "挂载即接管"）。所以真正要等的是：【我们画出第一帧有内容
-    // 的画面】，那一刻才把 loader 收掉 —— 一次 rAF 都不能插在中间。
-    //
-    // ⚠ 这里是两个【不同】的概念，混成一个就会出 bug：
-    //   tookOver    —— 视图归属：原生图谱是不是已经归我们了。挂载那一刻（原生
-    //                  被藏掉）就成立，因为画面已经归我们了。
-    //   loaderArmed —— 首帧待交接：画布上还没有内容、loader 正亮着，等第一帧
-    //                  有内容的画面画完再收。setData 时置位，frame 里完成。
-    //   曾经写成 tookOver 兼任两者，于是 setData 那句 `if (!tookOver)` 永远为假
-    //   → 交接永不执行 → loader 一直转（被 test/smoke-boot.js 抓到）。
-    // 老路径（deferTakeover = true）的观感是三段：原生图谱 → 我们的画布（种子
-    // 螺旋）→ 缓动适配视野。开关现在是常量 false，见文件上方挂载处的说明。
+    // 视图归属
     let tookOver = !deferTakeover || nativeMode;
+    // 首帧待交接
     let loaderArmed = false;
 
-    // 视野缓动状态（实现见 fitView 下方的 animateFitTo / stepCamAnim）。
-    // ⚠ 声明必须放在这里、而不是和那几个函数挨着：attachInteraction() 在我们
-    //   定义它们【之前】就跑了，而那些 hook 闭包会引用这个变量 —— 放后面虽然
-    //   靠"调用时机晚于声明"侥幸能work，但一次重排就会变成 TDZ 报错。
+    // 视野缓动
     let camAnim = null;
 
-    // 图谱显现时的一次淡入（见 setData 的 reveal 参数）。
-    // ⚠ 刻意【不放进 camera.js】：那个模块有一条结构性约束 —— 不暴露任何动画
-    //   方法，好让"激波"和"缩放"不可能被混淆。而且这个动画只改 canvas 的 CSS
-    //   opacity，它【不动相机】—— 相机的 fit 已经在 setData 里一次算完了。
+    // 图谱显现时的一次淡入
     let revealAnim = null;
-    let lastVisualAlpha = 1;      // 只在变化时写 style，避免每帧碰 DOM
 
-    // 数据加载后自动重新适配一次视野。
-    // 为什么必需：setData 里的 fitView 是在【种子布局】上算的 —— 那时节点还挤在
-    // 半径 ~240 的螺旋里。模拟跑完后图谱可能扩散到几千单位，而相机不会自己跟上，
-    // 结果就是视野里只剩一两个节点，看起来像白屏。
-    // 等模拟沉降后再适配一次，保证第一眼看到的是完整图谱。
-    // 用户一旦自己操作过（拖拽/平移），就取消这次自动适配，不跟人抢镜头。
+    // 只在变化时写 style，避免每帧碰 DOM
+    let lastVisualAlpha = 1;
+
+    // 自动适配
     let autoFitPending = false;
 
-    // ---- 「停顿帧」判据（见 frame 里 elapsed 的说明）----
-    // 超过「近期帧耗中位数 × STALL_FACTOR」且绝对上超过 STALL_MIN_MS 的那一帧，
-    // 视为主线程被外部占住（GC / 宿主 / 我们的同步沉降），只推进一个标称步长。
-    // STALL_MIN_MS 不能太小：正常抖动到 100ms 的库不该被当成停顿 ——
-    // 那会把它的时间推进压成 16.67ms/帧，物理变成慢动作。
+    // 停顿帧判据
     const STALL_MIN_MS = 100;
     const STALL_FACTOR = 3;
 
@@ -209,19 +181,13 @@
     // ---- 尺寸 ----
     let cssW = 1, cssH = 1;
 
-    // ⚠ 这里【必须】同步量一次，不能只靠 ResizeObserver。
-    //
-    //   实测（test/smoke-boot.js）：boot 期间 cam 的 W/H 一直是 Camera.create(1,1)
-    //   那个默认值，直到 setData 才被修正。原因是 overlay.onResize 的注册发生在
-    //   boot 后半段（见下面），而 boot 开头那次 fitView() 是按默认值算的 ——
-    //   于是"首帧视野"是错的，要靠 setData 里那次 fitView 再纠正一遍。
-    //   同步量掉之后 fitView 第一次就是对的，`api.fitPadding` 这类依赖视口尺寸的
-    //   计算也不会在首帧拿到错值。
+    // 每30帧检查尺寸
     const m0 = overlay.measure();
     cssW = Math.max(1, m0.w | 0);
     cssH = Math.max(1, m0.h | 0);
-    cam.resize(cssW, cssH);
 
+    // 重新分配画布
+    cam.resize(cssW, cssH);
     overlay.onResize((w, h) => {
       cssW = w; cssH = h;
       const dpr = Math.min(GFI.topWin.devicePixelRatio || 1, cfg.render.maxDpr);
@@ -231,7 +197,7 @@
       markDirty();
     });
 
-    // 工具栏（侧边栏那块面板用空实现，见 GFI.Toolbar.createNull 的说明）
+    // 工具栏
     const toolbar = wantToolbar ? GFI.Toolbar.create(overlay.toolbar, {
       onTogglePlay() { if (P.timeline) { P.timeline.toggle(); syncToolbar(); } },
       onScrub(p) {
@@ -246,6 +212,7 @@
         syncToolbar();
       },
       onFit() { fitViewAnimated(); },
+      onSnapshot() { snapshot(); },
     }) : GFI.Toolbar.createNull();
 
     function syncToolbar() {
@@ -289,7 +256,7 @@
       if (P.inter && P.inter.refreshHighlight) P.inter.refreshHighlight();
     }
 
-    // ---- 时间轴 ----
+    // 时间轴 
     function attachTimeline() {
       P.timeline = GFI.Timeline.create(P.D, P.sim, P.fx, {
         onPlayingChange() { syncToolbar(); markDirty(); },
@@ -352,14 +319,7 @@
       markDirty();
     }
 
-    // ---- 视野缓动 ----
-    // 为什么需要：setData 时的 fitView 是在【种子布局】上算的，模拟沉降完图谱
-    // 会大一圈（实测包围盒差 40%+），所以这里要再适配一次。瞬变会让整个画面
-    // "啪"地跳一下 —— 缓动就没这个问题。
-    //
-    // ⚠ 刻意【不放进 camera.js】：那个模块有一条结构性约束 —— 不暴露任何动画
-    //   方法，好让"激波"和"缩放"在 API 层面不可能被混淆（激波必须往模拟里注入
-    //   速度，绝不能靠改相机伪装）。相机动画一旦进了那个模块，这条约束就破了。
+    // 视野缓动 
     function animateFitTo(b, ms) {
       const pad = fitPad();
       const w = Math.max(1, b.maxX - b.minX), h = Math.max(1, b.maxY - b.minY);
@@ -372,6 +332,136 @@
       }
       camAnim = { t: 0, dur: ms / 1000, x0: cam.x, y0: cam.y, k0: cam.k, x1, y1, k1 };
       wake();
+    }
+
+
+    function snapshot(opts) {
+      opts = opts || {};
+      const paddingCss = opts.padding !== undefined ? opts.padding : 60;
+      const maxSize = opts.maxSize || 1600;
+      const format = opts.format === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+      const quality = opts.quality !== undefined ? opts.quality : 0.92;
+
+      // ---- ① 探测 ----
+      if (!running || !renderer) {
+        console.warn('[GFI] 截图失败：实例已销毁');
+        return false;
+      }
+      const src = overlay && overlay.canvas;
+      if (!src || !src.isConnected) {
+        console.warn('[GFI] 截图失败：canvas 不在 DOM');
+        return false;
+      }
+      if (!(src.width > 0 && src.height > 0)) {
+        console.warn(`[GFI] 截图失败：canvas 尺寸 ${src.width}×${src.height}`);
+        return false;
+      }
+      if (typeof src.toBlob !== 'function') {
+        console.warn('[GFI] 截图失败：不支持 canvas.toBlob');
+        return false;
+      }
+      if (!P.D || !P.D.n) {
+        console.warn('[GFI] 截图失败：没有数据');
+        return false;
+      }
+
+      // fitView
+      fitView();
+
+      // 包围盒→ 屏幕
+      const b = GFI.Data.bounds(P.D, true);
+      if (b.empty || !(b.maxX > b.minX) || !(b.maxY > b.minY)) {
+        console.warn('[GFI] 截图失败：没有可见节点');
+        return false;
+      }
+      const x0 = cam.worldToScreenX(b.minX);
+      const y0 = cam.worldToScreenY(b.minY);
+      const x1 = cam.worldToScreenX(b.maxX);
+      const y1 = cam.worldToScreenY(b.maxY);
+
+      const sxCss = Math.max(0, x0 - paddingCss);
+      const syCss = Math.max(0, y0 - paddingCss);
+      const swCss = Math.min(cam.W, x1 + paddingCss) - sxCss;
+      const shCss = Math.min(cam.H, y1 + paddingCss) - syCss;
+      if (swCss <= 0 || shCss <= 0) {
+        console.warn('[GFI] 截图失败：裁剪区域无效');
+        return false;
+      }
+
+      try {
+        renderer.render({
+          hoverIdx: -1,          
+          selectedIdx: -1,
+          lod: lodLevel,
+          labelsOn,
+          labelFade,
+        });
+      } catch (e) {
+        console.warn('[GFI] 截图失败：补画异常', e);
+        return false;
+      }
+
+      // 转设备像素
+      const dpr = src.width / cam.W;
+      const sx = Math.round(sxCss * dpr);
+      const sy = Math.round(syCss * dpr);
+      const sw = Math.round(swCss * dpr);
+      const sh = Math.round(shCss * dpr);
+      if (sw <= 0 || sh <= 0) {
+        console.warn('[GFI] 截图失败：裁剪尺寸为 0');
+        return false;
+      }
+
+      //  放大到最长边 maxSize
+      const scale = maxSize / Math.max(sw, sh);
+      const outW = Math.max(1, Math.round(sw * scale));
+      const outH = Math.max(1, Math.round(sh * scale));
+
+      let outCanvas = null;
+      try {
+        outCanvas = GFI.topDoc.createElement('canvas');
+        outCanvas.width = outW;
+        outCanvas.height = outH;
+        const g = outCanvas.getContext('2d');
+        if (!g) throw new Error('离屏 2d 上下文不可用');
+        g.fillStyle = renderer.bgColor || cfg.render.bgFallback;
+        g.fillRect(0, 0, outW, outH);
+        g.imageSmoothingEnabled = true;
+        g.imageSmoothingQuality = 'high';
+        g.drawImage(src, sx, sy, sw, sh, 0, 0, outW, outH);
+      } catch (e) {
+        console.warn('[GFI] 截图失败：绘制阶段异常', e);
+        return false;
+      }
+
+      // ---- ⑦ 导出 ----
+      try {
+        outCanvas.toBlob((blob) => {
+          if (!blob) {
+            console.warn('[GFI] 截图失败：toBlob 返回 null');
+            return;
+          }
+          try {
+            const url = URL.createObjectURL(blob);
+            const a = GFI.topDoc.createElement('a');
+            const d = new Date();
+            const p = (v) => String(v).padStart(2, '0');
+            const ext = format === 'image/jpeg' ? 'jpg' : 'png';
+            a.download = `graph-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+              + `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+            a.href = url;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          } catch (e) {
+            console.warn('[GFI] 截图下载失败', e);
+          }
+        }, format, quality);
+      } catch (e) {
+        console.warn('[GFI] 截图失败：导出异常（可能 canvas 被污染）', e);
+        return false;
+      }
+
+      return true;
     }
 
     function fitViewAnimated() {
@@ -391,18 +481,13 @@
       // 人对缩放的感知是对数的（同 zoomByWheel 用 zoomBase 指数一样）。
       cam.k = a.k0 * Math.pow(Math.max(1e-9, a.k1) / Math.max(1e-9, a.k0), e);
       if (p >= 1) { camAnim = null; fitK = cam.k; }
-      markDirty();                                       // 保持循环活着（busy 含 dirty）
+      markDirty();                                       // 保持循环活着
     }
 
-    /** 用户一动相机就放弃缓动 —— 不跟人抢镜头 */
+    // 用户操作取消缓动
     function cancelCamAnim() { camAnim = null; }
 
-    /**
-     * 交接：把 loader 收掉，画面正式交给我们的画布。
-     *
-     * ⚠ 只允许在【本帧已经画完】之后调用（frame 里的 loaderArmed 分支，或
-     *   setNativeMode 这种明确知道原生要回来的场合）。提前调 = 露一帧空白。
-     */
+    // 取消加载态
     function completeTakeover(reason) {
       tookOver = true;
       loaderArmed = false;
@@ -425,12 +510,10 @@
       emitter.emit('nativemode', nativeMode);
     }
 
-    // 置脏必须同时确保循环在跑。
-    // 否则会出现这种状态：循环因空闲停掉了 → 某个操作置了脏标志并（可能）重热了模拟
-    // → 但没有任何人在跑 rAF 去看那个标志 → 画面冻住，而且 alpha 永远停在重热值上
-    // （因为没有 tick 去衰减它）。之前 resize 就是这么把图谱冻住的。
+    // 置脏必须同时确保循环在跑
     function markDirty() {
       dirty = true;
+      // 确保循环在跑
       wake();
     }
 
@@ -477,8 +560,9 @@
           substeps++;
         }
 
-        // 每渲染帧一次特效
+        // 每渲染帧淡入淡出特效
         P.fx.update(Math.min(cfg.runtime.maxFrameMs, Math.max(0, elapsed)) / 1000);
+
         if (substeps >= maxSub) acc = 0;
 
         // 拖拽重建网格
@@ -552,18 +636,18 @@
         // lod档更新
         updateLod();
 
-        // 空闲检测
+        // 物理醒着、特效在跑、时间轴在播、用户平移、或 dirty为真，这帧要画
         const busy = P.sim.isAwake() || P.fx.anyActive() ||
           (P.timeline && P.timeline.playing) ||
           (P.inter && (P.inter.dragNode >= 0 || P.inter.panning)) ||
           dirty;
+        // 静止帧累计
         if (busy) { idleFrames = 0; dirty = false; }
         else if (++idleFrames > cfg.runtime.idleFrames) {
           stopLoop();
         }
       } catch (err) {
         if (++errorCount > 3) {
-          console.error('[GFI] 连续出错，拆卸', err);
           destroy('too many frame errors');
         } else {
           console.warn('[GFI] 帧内错误', err);
@@ -662,10 +746,6 @@
         instantReveal = warm;
         revealAnim = null;
         revealDurMs = 0;
-        // ⚠ canvas 元素是【复用】的（每次 setData 只换管线不换 DOM），所以
-        //   上一次显现留下的 opacity 必须显式清掉 —— 否则重载数据后画面会一直
-        //   停在半透明上（帧循环里那个"只在变化时写 style"的守卫会发现
-        //   lastVisualAlpha 已经是 1 而跳过写入，DOM 就永远回不来）。
         lastVisualAlpha = 1;
         overlay.canvas.style.opacity = '';
         if (warm) {
@@ -693,10 +773,6 @@
           ? `沉降布局命中 ${adopted}/${P.D.n}（一步到位${o.reveal ? '，显现淡入' : '，无缓动'}）`
           : `${P.D.n} 节点（即时沉降，adopted=${adopted}）`);
         startLoop();
-        // 数据已就位，安排交接：下一帧画完（那时画布上已经有内容了）再收起 loader。
-        // ⚠ 判据【不是】tookOver —— 视图归属在挂载那一刻就定了，这里要问的是
-        //   「loader 还亮着吗」。原生模式下 loader 是藏着的，这一句也不会把它翻出来
-        //   （completeTakeover 只会 hideLoader）。
         loaderArmed = true;
         return { warm, adopted, n: P.D.n };
       },
@@ -711,6 +787,7 @@
       /** 带缓动的适配视野（工具栏那个按钮用的就是它） */
       fitViewAnimated,
 
+      snapshot(opts) { return snapshot(opts); },
       /**
        * 实时调整外观（不用重载插件）。
        * 用法：__GFI__.setRender({ edgeColor: 'rgba(255,255,255,0.6)' })
