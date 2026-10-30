@@ -4,21 +4,11 @@
 
   const HIT_BUF = 64;          // 命中候选上限
 
-  /**
-   * 「当前活跃画布」—— 键鼠事件只由它处理。
-   *
-   * 为什么需要：`keydown` 是挂在 `GFI.topWin`（窗口）上的，不是挂在 canvas 上的。
-   * 同时接管全屏图谱和侧边栏页面图谱之后，两个实例都会收到同一次按键 ——
-   * 在侧边栏里按 Esc 会把全屏图谱的选中一起清掉（反之亦然）。
-   * 规则：指针进过哪块画布，哪块就是活跃的。
-   *
-   * ⚠ 判据写成「activeCanvas 为空 或 就是自己」—— 空的时候一律放行。
-   *   这样单实例（绝大多数时候）的行为和以前完全一样，不需要用户先把鼠标
-   *   移到画布上才认键盘。创建时也会把空白状态填成第一块画布。
-   */
+  // 侧边栏或是主图谱
   let activeCanvas = null;
 
   function claimActive(canvas) { activeCanvas = canvas; }
+
   function isActive(canvas) { return activeCanvas === null || activeCanvas === canvas; }
 
   /**
@@ -35,18 +25,15 @@
 
     // ---- 状态 ----
     const state = {
-      hoverIdx: -1,
-      selectedIdx: -1,
-      downNode: -1,
-      dragNode: -1,
-      panning: false,
+      hoverIdx: -1,  // 悬停
+      selectedIdx: -1,  // 选中
+      downNode: -1,  
+      dragNode: -1,  // 拖动节点
+      panning: false,  // 平移
       moved: false,
       downX: 0, downY: 0, downT: 0,
-      offX: 0, offY: 0,               // 抓取时节点相对指针的偏移（世界坐标）
-      // 用户是否自己操作过相机（平移/缩放/拖节点）。
-      // 用于让自动适配视野让位 —— 不能跟人抢镜头。
-      // 注意不能靠 onWake 来设置：平移【刻意不唤醒模拟】（否则每拖一下相机
-      // 就重热整张图），所以那条路径不会触发。
+      // 抓取时节点相对指针的偏移
+      offX: 0, offY: 0,               
       interacted: false,
       // 双指缩放
       pointers: new Map(),
@@ -62,12 +49,12 @@
       return [e.clientX - r.left, e.clientY - r.top];
     }
 
-    // 命中测试 —— 网格粗筛 + 精确判定
+    // 命中测试
     function hitTest(sx, sy) {
       const wx = cam.screenToWorldX(sx);
       const wy = cam.screenToWorldY(sy);
-      const tol = 4 / cam.k;                 // 4 屏幕像素的容差，换成世界单位
-      // 必须带上 nodeSize —— 否则节点放大后，边上那圈点不中
+      // 4 屏幕像素的容差
+      const tol = 4 / cam.k;                 
       const rcfg = GFI.config.render;
       const maxR = rcfg.radiusMax * rcfg.nodeSize / Math.max(0.01, cam.k) + tol;
 
@@ -90,7 +77,7 @@
       return best;
     }
 
-    // 邻域高亮（只在 hover 变化时重建，不是每帧）
+    // 邻域高亮
     function rebuildHighlight(hot) {
       const hl = D.hl;
       if (hot < 0) { hl.fill(1, 0, D.n); return; }
@@ -335,13 +322,7 @@
       sim.setAlphaTarget(0);
     }
 
-    // -----------------------------------------------------------------------
-    // 右键 = 固定 / 解除固定
-    // 拖拽本身【不再】钉住节点（松手就交还物理，见 onPointerUp）；这里是独立的手动
-    // 锚定：把某个节点钉死在当前位置不参与布局，用来固定你手动摆好的结构。
-    // 解除时会重热一下，让它漂回自己的弹簧平衡位。
-    // pointerdown 对 mouse 的 button!==0 已早退，右键不会触发平移/抓取。
-    // -----------------------------------------------------------------------
+    // 右键后固定或解除固定节点
     function onContextMenu(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -350,7 +331,7 @@
       if (hit < 0) return;
       if (sim.isPinned(hit)) {
         sim.unpin(hit);
-        // 解放回物理：轻微重热，让它漂回自己的弹簧平衡位
+        // 解放回物理
         if (D.deg[hit] > 0) sim.reheat(cfg.reheat.dragRelease);
       } else {
         sim.pin(hit, D.x[hit], D.y[hit]);
@@ -369,9 +350,7 @@
       if (changed && hooks.onCameraChange) hooks.onCameraChange();
     }
 
-    // -----------------------------------------------------------------------
     // 键盘 —— 必须判断焦点，用户正在 Logseq 里打字时抢按键是严重 bug
-    // -----------------------------------------------------------------------
     function typingInHost() {
       try {
         const el = GFI.topDoc.activeElement;
@@ -391,27 +370,37 @@
       }
     }
 
-    // -----------------------------------------------------------------------
-    // 指针碰过哪块画布，哪块就是"活跃"的 —— 键盘归它（见 isActive 的说明）
+    // 指针碰过哪块画布哪块活跃
     reg.add(canvas, 'pointerenter', () => claimActive(canvas));
     reg.add(canvas, 'pointerdown', () => claimActive(canvas));
-    // 首次创建时把空白状态填上，保证单实例下无脑放行
     if (activeCanvas === null) activeCanvas = canvas;
+
+    // 鼠标左键按下
     reg.add(canvas, 'pointerdown', onPointerDown);
+    // 鼠标移动
     reg.add(canvas, 'pointermove', onPointerMove);
+    // 鼠标松开左键
     reg.add(canvas, 'pointerup', onPointerUp);
+
+    // 浏览器/系统取消
     reg.add(canvas, 'pointercancel', onPointerCancel);
-    reg.add(canvas, 'pointerleave', onPointerLeave);
+
+    // 移出canvas边界
+    reg.add(canvas, 'pointerleave', onPointerLeave);  
+
+    // 滚轮
     reg.add(canvas, 'wheel', onWheel, { passive: false });
+
+    // 固定节点
     reg.add(canvas, 'contextmenu', onContextMenu);
+
+    // 键盘
     reg.add(GFI.topWin, 'keydown', onKeyDown);
 
     inter.destroy = function destroy() {
       cancelDrag();
       reg.removeAll();
       state.pointers.clear();
-      // 活跃画布被拆掉时必须清空 —— 留着一个已经不在 DOM 里的 canvas 会让
-      // 键盘被永久锁死（isActive 对另一块画布恒为 false，Esc 谁都不响应）。
       if (activeCanvas === canvas) activeCanvas = null;
     };
 

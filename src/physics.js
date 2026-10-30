@@ -249,7 +249,10 @@
       const shiftX = (sx / k) * cfg.centerStrength;
       const shiftY = (sy / k) * cfg.centerStrength;
       if (shiftX === 0 && shiftY === 0) return;
-      for (let i = 0; i < n; i++) { x[i] -= shiftX; y[i] -= shiftY; }
+      for (let i = 0; i < n; i++) { 
+        if (pinMode[i] === PIN_HARD) continue; 
+        x[i] -= shiftX; y[i] -= shiftY; 
+      }
     }
 
     // 零度节点锚在外圈环上
